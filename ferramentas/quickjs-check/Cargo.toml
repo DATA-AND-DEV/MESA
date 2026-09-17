@@ -1,0 +1,9 @@
+[package]
+name = "mesa-quickjs-check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Development-only check against the same JS engine used by SEELE.
+[dependencies]
+rquickjs = "=0.12.2"

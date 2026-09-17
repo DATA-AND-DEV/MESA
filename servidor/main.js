@@ -1,4 +1,4 @@
-/* Mesa 1.0 — JavaScript source is the distributed artifact. No dependencies.
+/* Mesa 1.2 — JavaScript source is the distributed artifact. No dependencies.
  * VINLAND informed the sheet structure and derived ability/proficiency model.
  * No book descriptions or third-party compendium were copied.
  * aoPedir is API v2. Never accept identity or permissions from the payload.
@@ -7,6 +7,71 @@
   'use strict';
   const LIMIT = { sheets: 16, scenes: 16, entries: 100, tokens: 48, walls: 128, image: 262144 };
   const abilities = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
+  const skills = [
+    ['acrobatics', 'dex', 'Acrobacia'], ['animal-handling', 'wis', 'Adestrar animais'],
+    ['arcana', 'int', 'Arcanismo'], ['athletics', 'str', 'Atletismo'],
+    ['deception', 'cha', 'Enganação'], ['stealth', 'dex', 'Furtividade'],
+    ['history', 'int', 'História'], ['intimidation', 'cha', 'Intimidação'],
+    ['insight', 'wis', 'Intuição'], ['investigation', 'int', 'Investigação'],
+    ['medicine', 'wis', 'Medicina'], ['nature', 'int', 'Natureza'],
+    ['perception', 'wis', 'Percepção'], ['performance', 'cha', 'Atuação'],
+    ['persuasion', 'cha', 'Persuasão'], ['sleight-of-hand', 'dex', 'Prestidigitação'],
+    ['religion', 'int', 'Religião'], ['survival', 'wis', 'Sobrevivência']
+  ];
+  const abilityLabels = { str: 'Força', dex: 'Destreza', con: 'Constituição', int: 'Inteligência', wis: 'Sabedoria', cha: 'Carisma' };
+  const modifier = score => Math.floor((score - 10) / 2);
+  const proficiency = s => Math.ceil(s.level / 4) + 1;
+  const ambience = { exploration: 'Exploração', mystery: 'Mistério', battle: 'Combate' };
+  function dice(formula) {
+    const match = /^(\d{1,2})d(4|6|8|10|12|20|100)([+-]\d{1,3})?$/.exec(text(formula, 24).replace(/\s/g, ''));
+    if (!match) fail('invalid-dice');
+    return { count: num(Number(match[1]), 1, 20), sides: Number(match[2]), bonus: Number(match[3] || 0) };
+  }
+  function roll(formula) {
+    const { count, sides, bonus } = dice(formula);
+    const rolls = Array.from({ length: count }, () => 1 + Math.floor(Math.random() * sides));
+    return formula + ' = ' + rolls.reduce((a, b) => a + b, bonus) + ' [' + rolls.join(', ') + ']';
+  }
+  function setMusic(c, preset) {
+    if (preset !== 'silence' && !Object.hasOwn(ambience, preset)) fail('invalid-music');
+    c.music = { preset: preset === 'silence' ? null : preset, playing: preset !== 'silence', position: 0, startedAt: mundo.agora() };
+  }
+  function imagePart(c, ctx, target, id, r, ceiling) {
+    const total = num(r.total, 1, 48), index = num(r.index, 0, total - 1), part = text(r.part, 7000);
+    const upload = r.upload ? key(r.upload) : 'legacy-' + ctx.person;
+    const base = 'channel-' + ctx.channel + '/' + id;
+    if (index === 0) {
+      if (arquivos.listar) arquivos.listar().filter(p => p.startsWith(base + '-image-') && p !== target.asset).forEach(p => arquivos.apagar(p));
+      target.upload = { total, next: 0, length: 0, path: base + '-upload.txt', id: upload, person: ctx.person };
+    }
+    if (!target.upload || target.upload.total !== total || target.upload.next !== index || target.upload.id !== upload || target.upload.person !== ctx.person) fail('upload-order');
+    // File writes can survive a rejected DB commit: trust only committed length.
+    const image = (index ? (arquivos.ler(target.upload.path) || '').slice(0, target.upload.length) : '') + part;
+    if (image.length > ceiling) fail('image-too-large');
+    if (!arquivos.escrever(target.upload.path, image)) fail('disk-failed');
+    target.upload.next++; target.upload.length = image.length;
+    if (index === total - 1) {
+      if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(image)) fail('invalid-image');
+      const path = base + '-image-' + (c.revision + 1) + '.txt';
+      if (!arquivos.escrever(path, image)) fail('disk-failed');
+      arquivos.apagar(target.upload.path); delete target.upload; target.asset = path;
+    }
+  }
+  function training(raw, allowed, max) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('invalid-training');
+    const result = {};
+    for (const id of Object.keys(raw)) {
+      if (!allowed.includes(id)) fail('invalid-training');
+      result[id] = num(raw[id], 0, max);
+    }
+    return result;
+  }
+  function conditions(raw) {
+    if (!Array.isArray(raw) || raw.length > 12) fail('invalid-conditions');
+    const result = [...new Set(raw.map(v => text(v, 40)))];
+    if (result.some(v => !v)) fail('invalid-conditions');
+    return result;
+  }
   const clone = value => JSON.parse(JSON.stringify(value));
   function fail(code) { throw new Error(code); }
   function text(value, max = 120) {
@@ -41,18 +106,28 @@
     s.spells = raw.spells.map(id => key(id));
     if (!Array.isArray(raw.slots) || raw.slots.length !== 9) fail('invalid-slots');
     s.slots = raw.slots.map(slot => ({ max: num(slot.max, 0, 20), used: num(slot.used, 0, slot.max) }));
+    s.skillRanks = training(raw.skillRanks ?? previous.skillRanks ?? {}, skills.map(v => v[0]), 2);
+    s.saveRanks = training(raw.saveRanks ?? previous.saveRanks ?? {}, abilities, 1);
+    // Conditions belong to session actions, not a potentially stale sheet editor.
+    s.conditions = conditions(previous.conditions || []);
+    s.actions = clone(previous.actions || []);
+    s.portrait = clone(previous.portrait || { asset: null, published: false });
     return s;
   }
   function projection(c, ctx) {
-    if (!c) return { ok: true, campaign: null, me: ctx.person, canSetup: ctx.admin };
+    const rules = { skills, abilities: abilityLabels, ambience };
+    if (!c) return { ok: true, campaign: null, me: ctx.person, canSetup: ctx.admin, rules };
     const master = c.gm === ctx.person;
     const visible = c.scenes.filter(s => master || (s.published && s.id === c.active));
     const out = {
       name: c.name, system: c.system, gm: c.gm, revision: c.revision, active: c.active,
       allowMove: c.allowMove, allowEdit: c.allowEdit, round: c.round, turn: c.turn,
-      sheets: c.sheets.filter(s => master || s.owner === ctx.person).map(clone),
+      sheets: c.sheets.filter(s => master || s.owner === ctx.person).map(s => {
+        const copy = clone(s); if (copy.portrait) delete copy.portrait.upload; return copy;
+      }),
       // Public identities are separate from full private sheets.
-      players: c.sheets.map(s => ({ id: s.id, name: s.name, owner: s.owner })),
+      players: c.sheets.map(s => ({ id: s.id, name: s.name, owner: s.owner, portrait: master || s.owner === ctx.person || s.portrait?.published ? s.portrait?.asset || null : null })),
+      music: clone(c.music || { preset: null, playing: false, position: 0, startedAt: 0 }),
       scenes: visible.map(s => {
         const v = clone(s); delete v.upload;
         if (!master) { delete v.notes; v.tokens = v.tokens.filter(t => !t.hidden); }
@@ -63,7 +138,7 @@
       entries: c.entries.filter(e => master || e.published).map(clone), log: clone(c.log)
     };
     if (!master) delete out.turn;
-    return { ok: true, me: ctx.person, isGM: master, campaign: out };
+    return { ok: true, me: ctx.person, isGM: master, campaign: out, rules, serverTime: mundo.agora() };
   }
   globalThis.aoPedir = (contextJSON, requestJSON) => {
     try {
@@ -71,13 +146,20 @@
       if (!ctx.person || !Number.isInteger(ctx.channel)) fail('invalid-context');
       const storage = 'campaign-' + ctx.channel;
       let c = dados[storage] ? JSON.parse(dados[storage]) : null;
+      if (c && c.encounterStarted === undefined) c.encounterStarted = c.turn > 0 || c.round > 1;
       if (r.op === 'view') return JSON.stringify(projection(c, ctx));
       if (r.op === 'asset') {
         if (!c) fail('not-found');
         const s = find(c.scenes, r.scene);
         if (c.gm !== ctx.person && (!s.published || s.id !== c.active)) fail('gm-only');
         if (!s.asset) fail('not-found');
-        return JSON.stringify({ ok: true, image: arquivos.ler(s.asset) });
+        return JSON.stringify({ ok: true, asset: s.asset, image: arquivos.ler(s.asset) });
+      }
+      if (r.op === 'portrait-asset') {
+        if (!c) fail('not-found'); const s = find(c.sheets, r.sheet);
+        if (ctx.person !== c.gm && s.owner !== ctx.person && !s.portrait?.published) fail('not-owner');
+        if (!s.portrait?.asset) fail('not-found');
+        return JSON.stringify({ ok: true, asset: s.portrait.asset, image: arquivos.ler(s.portrait.asset) });
       }
       if (!ctx.write && !ctx.admin) fail('read-only');
       const nonce = key(r.nonce);
@@ -109,6 +191,92 @@
             c.sheets[c.sheets.indexOf(old)] = fresh; break;
           }
           case 'sheet-owner': gm(c, ctx); find(c.sheets, r.id).owner = owner(r.owner); break;
+          case 'portrait-part': {
+            const s = find(c.sheets, r.sheet); editable(c, ctx, s);
+            s.portrait ||= { asset: null, published: false };
+            imagePart(c, ctx, s.portrait, 'portrait-' + s.id, r, 65536);
+            if (r.index === r.total - 1) s.portrait.published = false;
+            break;
+          }
+          case 'portrait-publish': {
+            gm(c, ctx); const s = find(c.sheets, r.sheet);
+            if (!s.portrait?.asset) fail('not-found'); s.portrait.published = r.published === true; break;
+          }
+          case 'portrait-clear': {
+            const s = find(c.sheets, r.sheet); editable(c, ctx, s);
+            s.portrait = { asset: null, published: false }; break;
+          }
+          case 'action-save': {
+            const s = find(c.sheets, r.sheet); editable(c, ctx, s); s.actions ||= [];
+            if (!r.id && s.actions.length >= 24) fail('limit');
+            if (!['action', 'bonus', 'reaction', 'free'].includes(r.kind)) fail('invalid-action');
+            if (!['manual', 'long'].includes(r.recharge)) fail('invalid-action');
+            const formula = text(r.formula || '', 24); if (formula) dice(formula);
+            const item = { id: r.id ? find(s.actions, r.id).id : next(c, 'action'), name: text(r.name, 60), kind: r.kind, description: text(r.description || '', 1000), formula, max: num(r.max, 0, 99), used: num(r.used, 0, r.max), recharge: r.recharge };
+            if (!item.name) fail('invalid-name');
+            if (r.id) s.actions[s.actions.findIndex(a => a.id === r.id)] = item; else s.actions.push(item);
+            break;
+          }
+          case 'action-remove': {
+            const s = find(c.sheets, r.sheet); editable(c, ctx, s); find(s.actions || [], r.id);
+            s.actions = s.actions.filter(a => a.id !== r.id); break;
+          }
+          case 'action-use': {
+            const s = find(c.sheets, r.sheet); editable(c, ctx, s); const a = find(s.actions || [], r.id);
+            if (a.max && a.used >= a.max) fail('no-use');
+            if (a.max) a.used++;
+            const kinds = { action: 'ação', bonus: 'ação bônus', reaction: 'reação', free: 'livre' };
+            log(c, ctx, s.name + ' · ' + a.name + ' · ' + kinds[a.kind] + (a.formula ? ' · ' + roll(a.formula) : ''));
+            break;
+          }
+          case 'music': {
+            gm(c, ctx); const m = c.music;
+            if (r.command === 'select') setMusic(c, r.preset);
+            else if (r.command === 'stop') setMusic(c, 'silence');
+            else if (r.command === 'pause') {
+              if (m?.playing) { m.position += Math.max(0, mundo.agora() - m.startedAt); m.playing = false; }
+            } else if (r.command === 'resume') {
+              if (!m?.preset) fail('invalid-music');
+              if (!m.playing) { m.startedAt = mundo.agora(); m.playing = true; }
+            } else fail('invalid-music');
+            break;
+          }
+          case 'vitality': {
+            const s = find(c.sheets, r.sheet); editable(c, ctx, s);
+            const amount = num(r.amount, 0, 9999);
+            if (r.kind === 'damage') {
+              const absorbed = Math.min(s.tempHp, amount);
+              s.tempHp -= absorbed; s.hp = Math.max(0, s.hp - (amount - absorbed));
+            } else if (r.kind === 'heal') s.hp = Math.min(s.maxHp, s.hp + amount);
+            else if (r.kind === 'temporary') s.tempHp = Math.max(s.tempHp, amount);
+            else fail('invalid-vitality');
+            // HP and conditions remain private; do not leak them through public logs.
+            break;
+          }
+          case 'conditions': {
+            const s = find(c.sheets, r.sheet); editable(c, ctx, s);
+            s.conditions = conditions(r.conditions); break;
+          }
+          case 'check': {
+            const s = find(c.sheets, r.sheet);
+            if (ctx.person !== c.gm && s.owner !== ctx.person) fail('not-owner');
+            let ability, rank = 0, label;
+            if (r.kind === 'skill') {
+              const skill = skills.find(v => v[0] === r.key); if (!skill) fail('invalid-check');
+              ability = skill[1]; rank = (s.skillRanks || {})[r.key] || 0; label = skill[2];
+            } else if (r.kind === 'ability' || r.kind === 'save') {
+              if (!abilities.includes(r.key)) fail('invalid-check');
+              ability = r.key; label = (r.kind === 'save' ? 'Resistência · ' : '') + abilityLabels[ability];
+              if (r.kind === 'save') rank = (s.saveRanks || {})[r.key] || 0;
+            } else fail('invalid-check');
+            if (!['normal', 'advantage', 'disadvantage'].includes(r.mode)) fail('invalid-check');
+            const bonus = modifier(s.abilities[ability]) + proficiency(s) * rank + num(r.bonus ?? 0, -99, 99);
+            const rolls = Array.from({ length: r.mode === 'normal' ? 1 : 2 }, () => 1 + Math.floor(Math.random() * 20));
+            const chosen = r.mode === 'disadvantage' ? Math.min(...rolls) : Math.max(...rolls);
+            const mode = { normal: 'normal', advantage: 'vantagem', disadvantage: 'desvantagem' }[r.mode];
+            log(c, ctx, s.name + ' · ' + label + ' · ' + mode + ' [' + rolls.join(', ') + '] → ' + chosen + (bonus >= 0 ? ' + ' : ' − ') + Math.abs(bonus) + ' = ' + (chosen + bonus));
+            break;
+          }
           case 'scene-create': {
             gm(c, ctx); if (c.scenes.length >= LIMIT.scenes) fail('limit');
             if (!['map', 'illustration'].includes(r.kind)) fail('invalid-scene');
@@ -122,8 +290,16 @@
             if (s.tokens.some(t => t.x >= cols || t.y >= rows) || s.walls.some(w => w.x >= cols || w.y >= rows)) fail('grid-occupied');
             s.cols = cols; s.rows = rows; break;
           }
-          case 'scene-show': gm(c, ctx); find(c.scenes, r.id).published = true; c.active = r.id; break;
-          case 'scene-hide': gm(c, ctx); find(c.scenes, r.id).published = false; if (c.active === r.id) c.active = null; break;
+          case 'scene-music': {
+            gm(c, ctx); const s = find(c.scenes, r.id);
+            if (!['inherit', 'silence', ...Object.keys(ambience)].includes(r.preset)) fail('invalid-music');
+            s.ambience = r.preset; break;
+          }
+          case 'scene-show': {
+            gm(c, ctx); const s = find(c.scenes, r.id); s.published = true; c.active = r.id;
+            if (s.ambience && s.ambience !== 'inherit') setMusic(c, s.ambience); break;
+          }
+          case 'scene-hide': gm(c, ctx); find(c.scenes, r.id).published = false; if (c.active === r.id) { c.active = null; setMusic(c, 'silence'); } break;
           case 'wall': {
             gm(c, ctx); const s = find(c.scenes, r.scene); const x = num(r.x, 0, s.cols - 1), y = num(r.y, 0, s.rows - 1);
             const index = s.walls.findIndex(w => w.x === x && w.y === y);
@@ -145,17 +321,25 @@
           case 'token-remove': { gm(c, ctx); const s = find(c.scenes, r.scene); s.tokens = s.tokens.filter(t => t.id !== r.id); break; }
           case 'initiative-add': {
             gm(c, ctx); if (c.initiative.length >= 32) fail('limit');
-            c.initiative.push({ id: next(c, 'init'), name: text(r.name, 60), value: num(r.value, -20, 99), hidden: r.hidden === true });
-            c.initiative.sort((a, b) => b.value - a.value); c.turn = 0; break;
+            const current = c.encounterStarted && c.initiative[c.turn]?.id;
+            const char = r.sheet ? find(c.sheets, r.sheet) : null;
+            const name = char ? char.name : text(r.name, 60); if (!name) fail('invalid-name');
+            c.initiative.push({ id: next(c, 'init'), sheet: char?.id || null, name, value: num(r.value, -20, 99), hidden: r.hidden === true });
+            c.initiative.sort((a, b) => b.value - a.value);
+            c.turn = current ? c.initiative.findIndex(i => i.id === current) : 0; break;
           }
-          case 'initiative-next': gm(c, ctx); if (!c.initiative.length) fail('empty-initiative'); c.turn++; if (c.turn >= c.initiative.length) { c.turn = 0; c.round++; } break;
-          case 'initiative-clear': gm(c, ctx); c.initiative = []; c.turn = 0; c.round = 1; break;
+          case 'initiative-remove': {
+            gm(c, ctx); const item = find(c.initiative, r.id), index = c.initiative.indexOf(item);
+            c.initiative.splice(index, 1);
+            if (!c.initiative.length) { c.turn = 0; c.round = 1; c.encounterStarted = false; }
+            else if (index < c.turn) c.turn--;
+            else if (c.turn >= c.initiative.length) { c.turn = 0; if (c.encounterStarted) c.round++; }
+            break;
+          }
+          case 'initiative-next': gm(c, ctx); if (!c.initiative.length) fail('empty-initiative'); c.encounterStarted = true; c.turn++; if (c.turn >= c.initiative.length) { c.turn = 0; c.round++; } break;
+          case 'initiative-clear': gm(c, ctx); c.initiative = []; c.turn = 0; c.round = 1; c.encounterStarted = false; break;
           case 'roll': {
-            const match = /^(\d{1,2})d(4|6|8|10|12|20|100)([+-]\d{1,3})?$/.exec(text(r.formula, 24).replace(/\s/g, ''));
-            if (!match) fail('invalid-dice');
-            const count = num(Number(match[1]), 1, 20), sides = Number(match[2]), bonus = Number(match[3] || 0);
-            const rolls = Array.from({ length: count }, () => 1 + Math.floor(Math.random() * sides));
-            log(c, ctx, text(r.label || 'Dados', 60) + ' · ' + r.formula + ' = ' + (rolls.reduce((a, b) => a + b, bonus)) + ' [' + rolls.join(', ') + ']'); break;
+            log(c, ctx, text(r.label || 'Dados', 60) + ' · ' + roll(r.formula)); break;
           }
           case 'entry-save': {
             gm(c, ctx); if (!r.id && c.entries.length >= LIMIT.entries) fail('limit');
@@ -170,29 +354,9 @@
             if (level > 0) { const slot = s.slots[level - 1]; if (slot.used >= slot.max) fail('no-slot'); slot.used++; }
             log(c, ctx, s.name + ' usou ' + e.name + (level ? ' · espaço ' + level : ' · truque')); break;
           }
-          case 'rest': { const s = find(c.sheets, r.sheet); editable(c, ctx, s); s.hp = s.maxHp; s.slots.forEach(v => v.used = 0); log(c, ctx, s.name + ' · descanso longo'); break; }
+          case 'rest': { const s = find(c.sheets, r.sheet); editable(c, ctx, s); s.hp = s.maxHp; s.slots.forEach(v => v.used = 0); (s.actions || []).filter(a => a.recharge === 'long').forEach(a => a.used = 0); log(c, ctx, s.name + ' · descanso longo'); break; }
           case 'image-part': {
-            gm(c, ctx); const s = find(c.scenes, r.scene), total = num(r.total, 1, 48), index = num(r.index, 0, total - 1), part = text(r.part, 7000);
-            if (index === 0) {
-              const prefix = 'channel-' + ctx.channel + '/' + s.id + '-image-';
-              // Reclaim old/uncommitted images only on the next upload. Never
-              // delete the currently committed image before its replacement commits.
-              if (arquivos.listar) arquivos.listar().filter(p => p.startsWith(prefix) && p !== s.asset).forEach(p => arquivos.apagar(p));
-              s.upload = { total, next: 0, length: 0, path: 'channel-' + ctx.channel + '/' + s.id + '-upload.txt' };
-            }
-            if (!s.upload || s.upload.total !== total || s.upload.next !== index) fail('upload-order');
-            // A previous file write can outlive a rejected database commit.
-            // Append only to the length recorded by the last committed request.
-            const image = (index ? (arquivos.ler(s.upload.path) || '').slice(0, s.upload.length) : '') + part;
-            if (image.length > LIMIT.image) fail('image-too-large');
-            if (!arquivos.escrever(s.upload.path, image)) fail('disk-failed');
-            s.upload.next++; s.upload.length = image.length;
-            if (index === total - 1) {
-              if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(image)) fail('invalid-image');
-              const path = 'channel-' + ctx.channel + '/' + s.id + '-image-' + (c.revision + 1) + '.txt';
-              if (!arquivos.escrever(path, image)) fail('disk-failed');
-              arquivos.apagar(s.upload.path); delete s.upload; s.asset = path;
-            }
+            gm(c, ctx); imagePart(c, ctx, find(c.scenes, r.scene), r.scene, r, LIMIT.image);
             break;
           }
           default: fail('unknown-action');
