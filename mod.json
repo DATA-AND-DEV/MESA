@@ -3,7 +3,7 @@
   "id": "seele/mesa",
   "version": "1.2.0",
   "api": 2,
-  "repo": "https://github.com/DATA-AND-DEV/SEELE-MOD-MESA",
+  "repo": "https://github.com/DATA-AND-DEV/MESA",
   "reach": ["dom", "estado da campanha no servidor", "arquivos de mapas e cenas"],
   "client": "cliente/main.js",
   "server": "servidor/main.js"
