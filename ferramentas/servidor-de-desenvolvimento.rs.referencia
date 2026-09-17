@@ -1,0 +1,84 @@
+//! Isolated local server for developing the Mesa MOD. Never overwrites a package.
+use anyhow::{Context, Result};
+use seele_server::{
+    persistence::{
+        mods::{enable, EnabledMod},
+        Location,
+    },
+    Daemon, ServerConfig,
+};
+use std::{net::SocketAddr, path::PathBuf};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let root = PathBuf::from(
+        std::env::args()
+            .nth(1)
+            .context("usage: cargo run -p seele-server --example mesa -- /absolute/new/folder")?,
+    );
+    anyhow::ensure!(root.is_absolute(), "use an absolute path");
+    let package = root.join("mods/seele/mesa");
+    let mut files = vec![
+        (
+            "mod.json".to_string(),
+            include_bytes!("../../../mods/mesa/mod.json").to_vec(),
+        ),
+        (
+            "cliente/main.js".to_string(),
+            include_bytes!("../../../mods/mesa/cliente/main.js").to_vec(),
+        ),
+        (
+            "servidor/main.js".to_string(),
+            include_bytes!("../../../mods/mesa/servidor/main.js").to_vec(),
+        ),
+    ];
+    // Reopening this development world is allowed only with identical code.
+    if package.exists() {
+        for (name, bytes) in &files {
+            anyhow::ensure!(
+                std::fs::read(package.join(name))? == *bytes,
+                "package differs: create a new development folder; old campaign preserved"
+            );
+        }
+    } else {
+        std::fs::create_dir_all(package.join("cliente"))?;
+        std::fs::create_dir_all(package.join("servidor"))?;
+        for (name, bytes) in &files {
+            std::fs::write(package.join(name), bytes)?;
+        }
+    }
+    let hash = seele_proto::mods::hex(&seele_proto::mods::content_hash(&mut files));
+    let daemon = Daemon::bind(ServerConfig {
+        name: "Mesa — desenvolvimento".into(),
+        listen: SocketAddr::from(([127, 0, 0, 1], 8384)),
+        database: Location::File(root.join("seele.db")),
+        mods_dir: Some(root.join("mods")),
+        ..ServerConfig::default()
+    })
+    .await?;
+    {
+        let db = daemon.server().persistence.lock().await;
+        enable(
+            &db,
+            &EnabledMod {
+                id: "seele/mesa".into(),
+                version: "1.0.0".into(),
+                hash,
+                repo: "https://github.com/DATA-AND-DEV/SEELE".into(),
+                reach: vec![
+                    "dom".into(),
+                    "estado da campanha no servidor".into(),
+                    "arquivos de mapas e cenas".into(),
+                ],
+                server_half: true,
+            },
+        )?;
+    }
+    println!(
+        "Mesa: {}\nFingerprint: {}\nClient package: {}",
+        daemon.local_addr()?,
+        daemon.fingerprint(),
+        package.display()
+    );
+    daemon.run().await
+}
