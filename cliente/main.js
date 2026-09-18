@@ -20,7 +20,14 @@
   const rules = [
     `.mesa-root,.mesa-dialog,#seele-mesa-launch{--bg:var(--seele-negro-absoluto,#050403);--panel:var(--seele-negro-painel,#0A0806);--line:var(--seele-linha,#241F19);--strong:var(--seele-linha-forte,#3A322A);--ink:var(--seele-osso,#EAE3CF);--muted:var(--seele-rotulo-painel,#908574);--accent:var(--seele-laranja-nerv,#F2521F);--tint:var(--seele-laranja-fraco,#331704);--green:var(--seele-fosforo,#6BFFB6);color:var(--ink);font:13px/1.5 var(--seele-mono,'IBM Plex Mono',monospace);box-sizing:border-box;color-scheme:dark}`,
     `.mesa-root *,.mesa-dialog *{box-sizing:border-box}`,
-    `#seele-mesa-launch{position:fixed;right:24px;bottom:40px;z-index:50;background:var(--bg);border:1px solid var(--accent);padding:10px 24px;color:var(--accent);cursor:pointer;border-radius:0}`,
+    `.mesa-launcher{margin:16px 12px 12px;padding-top:12px;border-top:1px solid var(--seele-linha,#241F19);flex-shrink:0}`,
+    `.mesa-launcher-heading{margin:0 0 8px;font:500 10px/1.5 var(--seele-mono,'IBM Plex Mono',monospace);letter-spacing:.13em;color:var(--seele-rotulo-painel,#908574)}`,
+    `#seele-mesa-launch{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;background:transparent;border:1px solid transparent;border-left:2px solid var(--accent);padding:8px 10px;color:var(--ink);cursor:pointer;border-radius:0;text-align:left;font-size:12px;letter-spacing:.04em}`,
+    `#seele-mesa-launch:hover,#seele-mesa-launch[aria-expanded=true]{background:var(--tint);border-color:var(--accent)}`,
+    `#seele-mesa-launch:focus-visible{outline:2px solid var(--accent);outline-offset:3px}`,
+    `#seele-mesa-launch svg{width:20px;height:20px;flex-shrink:0;color:var(--accent)}`,
+    `.mesa-launcher-kind{margin-left:auto;color:var(--muted);font-size:10px;letter-spacing:.1em}`,
+    `.mesa-launcher-fallback{max-width:260px}`,
     `.mesa-root{position:fixed;inset:32px 0 0;z-index:90;display:flex;flex-direction:column;background:var(--bg);overflow:hidden}`,
     `.mesa-root[hidden]{display:none}`,
     `.mesa-root button,.mesa-dialog button{font:inherit;cursor:pointer;border:1px solid var(--strong);background:var(--panel);color:var(--ink);border-radius:0;padding:8px 12px;box-shadow:none;letter-spacing:0}`,
@@ -80,10 +87,22 @@
       }
     }
   });
-  const launch = document.createElement('button'); launch.id = 'seele-mesa-launch'; launch.textContent = 'MESA'; launch.type = 'button';
-  const root = document.createElement('section'); root.className = 'mesa-root'; root.hidden = true; root.setAttribute('aria-label', 'Mesa — jogo de RPG');
+  const launch = document.createElement('button'); launch.id = 'seele-mesa-launch'; launch.type = 'button';
+  launch.setAttribute('aria-label', 'MESA'); launch.title = 'Abrir Mesa — jogo de RPG';
+  launch.setAttribute('aria-expanded', 'false'); launch.setAttribute('aria-controls', 'seele-mesa-panel');
+  launch.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 2 22 8v8l-10 6-10-6V8Z M2 8l10 6 10-6 M12 14v8 M12 2v12"/></svg><span>MESA</span><span class="mesa-launcher-kind" aria-hidden="true">RPG</span>';
+  const launcher = document.createElement('section'); launcher.className = 'mesa-launcher'; launcher.setAttribute('aria-label', 'MODs — Mesa');
+  const launcherHeading = document.createElement('h2'); launcherHeading.className = 'mesa-launcher-heading'; launcherHeading.textContent = 'MODS';
+  launcher.append(launcherHeading, launch);
+  // The channel column owns navigation; placing this inside its scrolling area
+  // also inherits SEELE's screen visibility and narrow-window channel drawer.
+  // Older shells/previews get an in-flow entry, never a floating chat overlay.
+  const launchHost = document.querySelector('#tela-sessao .painel-canais .canais-rolagem');
+  if (!launchHost) launcher.classList.add('mesa-launcher-fallback');
+  (launchHost || document.body).append(launcher);
+  const root = document.createElement('section'); root.id = 'seele-mesa-panel'; root.className = 'mesa-root'; root.hidden = true; root.setAttribute('aria-label', 'Mesa — jogo de RPG'); root.tabIndex = -1;
   const modal = document.createElement('dialog'); modal.className = 'mesa-dialog';
-  document.body.append(launch, root, modal);
+  document.body.append(root, modal);
   let snapshot, channel, view, tab = 'game', sceneId, selected, wallMode = false, busy = false, disposed = false, poll, drag, lastSignature = '', editingRevision;
   const images = new Map(); const pendingImages = new Set();
   let serverOffset = 0, lastContact = 0;
@@ -314,7 +333,7 @@
   }
   async function handle(action,id) {
     const campaign=c(), gm=view?.isGM, s=scene();
-    if(action==='close'){root.hidden=true;stopSound();modal.close();return;}
+    if(action==='close'){root.hidden=true;launch.setAttribute('aria-expanded','false');stopSound();modal.close();launch.focus();return;}
     if(action==='tab'){tab=id;render();return;}
     if(action==='setup'){dialog('CRIAR CAMPANHA',field('Nome da campanha','name','','text','required maxlength="80"')+`<label>Sistema<select name="system"><option value="dnd5e-2014">D&D 5e · regras de 2014</option><option value="free">Sistema livre</option></select></label><label>GM<select name="gm">${peopleOptions(String(snapshot.me))}</select></label>`,'Criar',f=>act('setup',Object.fromEntries(f)));return;}
     if(action==='settings'){dialog('CAMPANHA',field('Nome','name',campaign.name,'text','required maxlength="80"')+`<label>GM<select name="gm">${peopleOptions(campaign.gm)}</select></label>`+check('Jogadores podem editar suas fichas','allowEdit',campaign.allowEdit)+check('Jogadores podem mover suas peças','allowMove',campaign.allowMove),'Salvar',f=>act('settings',{name:f.get('name'),gm:f.get('gm'),allowEdit:f.has('allowEdit'),allowMove:f.has('allowMove')}));return;}
@@ -387,8 +406,8 @@
   }
   function clicks(e) {const b=e.target.closest('[data-action]');if(b)handle(b.dataset.action,b.dataset.id).catch(error=>status(message(error),true));}
   root.addEventListener('click',clicks);modal.addEventListener('click',clicks);
-  launch.onclick=async()=>{root.hidden=false;try{snapshot=await api.snapshot();channel=channel||snapshot.open_channel||snapshot.channels?.[0]?.id;if(!channel){root.innerHTML='<div class="mesa-empty"><h1>CRIE UM CANAL NO SEELE PARA ABRIR A MESA.</h1><button data-action="close">Voltar</button></div>';return;}channel=Number(channel);render();await read(true);}catch(e){root.innerHTML=`<div class="mesa-empty"><h1>MESA INDISPONÍVEL</h1><p>${esc(message(e))}</p><button data-action="close">Voltar</button></div>`;}};
+  launch.onclick=async()=>{root.hidden=false;launch.setAttribute('aria-expanded','true');root.focus();try{snapshot=await api.snapshot();channel=channel||snapshot.open_channel||snapshot.channels?.[0]?.id;if(!channel){root.innerHTML='<div class="mesa-empty"><h1>CRIE UM CANAL NO SEELE PARA ABRIR A MESA.</h1><button data-action="close">Voltar</button></div>';return;}channel=Number(channel);render();await read(true);}catch(e){root.innerHTML=`<div class="mesa-empty"><h1>MESA INDISPONÍVEL</h1><p>${esc(message(e))}</p><button data-action="close">Voltar</button></div>`;}};
   poll=setInterval(()=>read(),2000);
-const dispose=e=>{if(e.detail!=='seele/mesa')return;disposed=true;clearInterval(poll);clearInterval(audio.timer);stopSound();audio.context?.close().catch(()=>{});modal.close();root.remove();modal.remove();launch.remove();releaseStyles();globalThis.removeEventListener('seele-mod-unload',dispose);};
+const dispose=e=>{if(e.detail!=='seele/mesa')return;disposed=true;clearInterval(poll);clearInterval(audio.timer);stopSound();audio.context?.close().catch(()=>{});modal.close();root.remove();modal.remove();launcher.remove();releaseStyles();globalThis.removeEventListener('seele-mod-unload',dispose);};
   globalThis.addEventListener('seele-mod-unload',dispose);
 })();

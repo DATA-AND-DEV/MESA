@@ -18,6 +18,30 @@ const {spawn}=require('node:child_process');
   });
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(address);
+  // Standalone preview remains usable without covering a corner of the page.
+  assert.equal(await page.locator('.mesa-launcher-fallback').count(),1);
+  assert.equal(await page.locator('#seele-mesa-launch').evaluate(e=>getComputedStyle(e).position),'static');
+  // Exercise the SEELE channel-column mount and lifecycle independently of
+  // campaign state. This fixture is not a native WebView integration test.
+  await page.evaluate(()=>{
+    window.dispatchEvent(new CustomEvent('seele-mod-unload',{detail:'seele/mesa'}));
+    const session=document.createElement('section');session.id='tela-sessao';
+    session.innerHTML='<section class="painel-canais"><div class="canais-rolagem"><ul id="lista-linhas"><li>campanha</li></ul></div><div class="operador">Operador preservado</div></section>';
+    document.body.append(session);
+  });
+  assert.equal(await page.locator('.mesa-launcher').count(),0);
+  await page.addScriptTag({url:address+'/client.js'});
+  assert.equal(await page.locator('#tela-sessao .canais-rolagem #seele-mesa-launch').count(),1);
+  assert.equal(await page.locator('.mesa-launcher-fallback').count(),0);
+  assert.equal(await page.locator('.operador').textContent(),'Operador preservado');
+  await page.evaluate(()=>{document.getElementById('tela-sessao').hidden=true;});
+  assert.equal(await page.locator('#seele-mesa-launch').isVisible(),false);
+  await page.evaluate(()=>{document.getElementById('tela-sessao').hidden=false;});
+  await page.getByRole('button',{name:'MESA',exact:true}).click();
+  assert.equal(await page.locator('#seele-mesa-launch').getAttribute('aria-expanded'),'true');
+  await page.locator('[data-action=close]').first().click();
+  assert.equal(await page.locator('#seele-mesa-launch').getAttribute('aria-expanded'),'false');
+  assert.equal(await page.evaluate(()=>document.activeElement.id),'seele-mesa-launch');
   await page.getByRole('button',{name:'MESA',exact:true}).click();
   await page.getByRole('button',{name:'CRIAR CAMPANHA'}).click();
   await page.getByLabel('Nome da campanha').fill('O Observatório Vazio');

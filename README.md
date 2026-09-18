@@ -110,6 +110,13 @@ node ferramentas/mesa-package.mjs /caminho/absoluto/config/mods/seele/mesa
 Instale os mesmos três arquivos no host e em cada cliente. Habilite `seele/mesa`
 no servidor (comando Tauri `habilitar_mod`), reconecte e aceite o conjunto de
 MODs. O botão MESA aparece após o cliente conferir o hash exigido pelo servidor.
+Ele fica na coluna de salas e canais, abaixo das listas, na seção **MODS**,
+com um ícone de dado e a indicação **RPG**. Em janelas estreitas, abra a gaveta
+de canais do SEELE para encontrá-lo. Não há mais botão flutuante sobre o chat.
+Em cascas antigas sem essa coluna, o acesso fica no fluxo normal da página.
+Ao fechar o Mesa, o foco do teclado retorna ao botão. A integração usa a
+estrutura atual da coluna (`#tela-sessao .painel-canais .canais-rolagem`);
+mudanças nessa estrutura precisam de validação de compatibilidade.
 Para hospedar o pacote em um servidor nativo de desenvolvimento, execute no
 repositório **SEELE** (o segundo caminho deve ser uma pasta nova):
 
