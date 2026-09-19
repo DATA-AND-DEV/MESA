@@ -43,6 +43,24 @@ const TRILHAS = [
   { valor: 'battle', dentro: 'COMBATE' },
 ];
 
+/** Os tipos de ação e as recuperações que o servidor conhece. */
+const TIPOS_DE_ACAO = [
+  { valor: 'action', dentro: 'AÇÃO' },
+  { valor: 'bonus', dentro: 'BÔNUS' },
+  { valor: 'reaction', dentro: 'REAÇÃO' },
+  { valor: 'free', dentro: 'LIVRE' },
+];
+const RECUPERACOES = [
+  { valor: 'manual', dentro: 'MANUAL' },
+  { valor: 'long', dentro: 'DESCANSO LONGO' },
+];
+
+/** A ação sendo criada ou editada, e o verbete idem. */
+let acaoEmEdicao = null;
+let verbeteEmEdicao = null;
+/** A cena sendo ajustada: grade, descrição e notas. */
+let cenaEmEdicao = null;
+
 /** Os seis atributos, na ordem de sempre. */
 const ATRIBUTOS = [['str', 'FOR'], ['dex', 'DES'], ['con', 'CON'], ['int', 'INT'], ['wis', 'SAB'], ['cha', 'CAR']];
 /** Qual ficha está aberta para edição, e qual cena para ajuste. */
@@ -233,9 +251,107 @@ function aFichaAberta(campanha) {
     linha([
       botao('gravar-ficha', mudou ? 'GRAVAR FICHA' : 'GRAVADA', !mudou),
       botao('descartar-ficha', 'DESCARTAR', !mudou),
+      botao('descansar', 'DESCANSO LONGO'),
     ]),
   );
+
+  // **Espaços de magia, nível a nível.** Eles são do jogo, e um VTT que os
+  // mostra sem deixar mexer é um VTT em que se anota noutro lugar.
+  partes.push(cabecalho('ESPAÇOS DE MAGIA'));
+  partes.push(linha((edit.slots ?? []).map((slot, i) => campo(
+    's-' + i, 'NÍVEL ' + (i + 1), String(slot.max ?? 0),
+  ))));
+  partes.push(texto((edit.slots ?? []).map((s, i) =>
+    (i + 1) + ': ' + ((s.max ?? 0) - (s.used ?? 0)) + '/' + (s.max ?? 0)).join(' · ')));
+
+  // **Magias preparadas**: quais verbetes do compêndio esta ficha leva, e o
+  // botão que gasta um espaço ao conjurar.
+  partes.push(cabecalho('MAGIAS PREPARADAS'));
+  const preparadas = new Set(edit.spells ?? []);
+  for (const entrada of campanha.entries) {
+    partes.push(linha([
+      texto(entrada.name + ' · nível ' + entrada.level),
+      botao('magia-' + entrada.id, preparadas.has(entrada.id) ? 'TIRAR' : 'PREPARAR'),
+      ...(preparadas.has(entrada.id) ? [botao('conjurar-' + entrada.id, 'CONJURAR')] : []),
+    ]));
+  }
+  if (!campanha.entries.length) partes.push(texto('O compêndio está vazio.'));
+
+  // **Ações**: o que a ficha faz, com fórmula, usos e recuperação.
+  partes.push(cabecalho('AÇÕES'));
+  for (const acao of ficha.actions ?? []) {
+    partes.push(linha([
+      texto(acao.name + ' · ' + acao.kind + (acao.formula ? ' · ' + acao.formula : '')
+        + (acao.max ? ' · ' + (acao.max - acao.used) + '/' + acao.max : '')),
+      botao('usar-acao-' + acao.id, 'USAR'),
+      botao('editar-acao-' + acao.id, 'EDITAR'),
+      botao('tirar-acao-' + acao.id, 'TIRAR'),
+    ]));
+  }
+  const acao = acaoEmEdicao;
+  partes.push(linha([
+    campo('ac-name', 'AÇÃO', acao?.name ?? ''),
+    escolha('ac-kind', 'TIPO', acao?.kind ?? 'action', TIPOS_DE_ACAO),
+    campo('ac-formula', 'FÓRMULA', acao?.formula ?? ''),
+  ]));
+  partes.push(linha([
+    campo('ac-max', 'USOS', String(acao?.max ?? 0)),
+    escolha('ac-recharge', 'RECUPERA', acao?.recharge ?? 'manual', RECUPERACOES),
+    campo('ac-description', 'DESCRIÇÃO', acao?.description ?? ''),
+    botao('gravar-acao', acao?.id ? 'GRAVAR AÇÃO' : 'CRIAR AÇÃO', !acao?.name),
+  ]));
   return partes;
+}
+
+/** O compêndio, editável: criar, mudar e publicar um verbete. */
+function oCompendio(campanha) {
+  if (!ultimo.isGM) return [];
+  const e = verbeteEmEdicao;
+  return [
+    cabecalho('COMPÊNDIO'),
+    ...campanha.entries.map(entrada => linha([
+      texto(entrada.name + ' · ' + entrada.kind + ' · nível ' + entrada.level
+        + (entrada.published ? ' · publicado' : ' · só o GM vê')),
+      botao('editar-verbete-' + entrada.id, 'EDITAR'),
+      botao('publicar-verbete-' + entrada.id, entrada.published ? 'RECOLHER' : 'PUBLICAR'),
+    ])),
+    linha([
+      campo('v-name', 'VERBETE', e?.name ?? ''),
+      campo('v-kind', 'TIPO', e?.kind ?? 'nota'),
+      campo('v-level', 'NÍVEL', String(e?.level ?? 0)),
+    ]),
+    linha([
+      campo('v-range', 'ALCANCE', e?.range ?? ''),
+      campo('v-cost', 'CUSTO', e?.cost ?? ''),
+      campo('v-formula', 'FÓRMULA', e?.formula ?? ''),
+    ]),
+    linha([
+      campo('v-description', 'DESCRIÇÃO', e?.description ?? ''),
+      botao('gravar-verbete', e?.id ? 'GRAVAR VERBETE' : 'CRIAR VERBETE', !e?.name),
+    ]),
+  ];
+}
+
+/** A cena ativa, ajustável: grade, descrição e notas do GM. */
+function aCenaEmAjuste(campanha) {
+  const cena = cenaAtiva(campanha);
+  if (!cena || !ultimo.isGM) return [];
+  const c = cenaEmEdicao ?? cena;
+  const mudou = cenaEmEdicao !== null;
+  return [
+    cabecalho('AJUSTE DA CENA'),
+    linha([
+      campo('c-name', 'NOME', c.name ?? ''),
+      campo('c-cols', 'COLUNAS', String(c.cols ?? 20)),
+      campo('c-rows', 'LINHAS', String(c.rows ?? 14)),
+    ]),
+    campo('c-description', 'DESCRIÇÃO', c.description ?? ''),
+    campo('c-notes', 'NOTAS DO GM', c.notes ?? ''),
+    linha([
+      botao('gravar-cena', mudou ? 'GRAVAR CENA' : 'GRAVADA', !mudou),
+      botao('descartar-cena', 'DESCARTAR', !mudou),
+    ]),
+  ];
 }
 
 function oResto(campanha) {
@@ -299,6 +415,8 @@ function desenhoDoEstado() {
     ...oTabuleiro(campanha),
     ...osControles(campanha),
     ...aFichaAberta(campanha),
+    ...aCenaEmAjuste(campanha),
+    ...oCompendio(campanha),
     ...oResto(campanha),
   ];
 }
@@ -390,6 +508,38 @@ iniciar(
         repintar(desenhoDoEstado());
         return null;
       }
+      // Os três rascunhos com prefixo próprio: ação, verbete e cena.
+      if (evento.chave.startsWith('ac-')) {
+        acaoEmEdicao = { ...(acaoEmEdicao ?? {}) };
+        const nome = evento.chave.slice(3);
+        acaoEmEdicao[nome] = nome === 'max' ? (Number(evento.valor) || 0) : evento.valor;
+        repintar(desenhoDoEstado());
+        return null;
+      }
+      if (evento.chave.startsWith('v-')) {
+        verbeteEmEdicao = { ...(verbeteEmEdicao ?? {}) };
+        const nome = evento.chave.slice(2);
+        verbeteEmEdicao[nome] = nome === 'level' ? (Number(evento.valor) || 0) : evento.valor;
+        repintar(desenhoDoEstado());
+        return null;
+      }
+      if (evento.chave.startsWith('c-') && cena) {
+        cenaEmEdicao = { ...(cenaEmEdicao ?? cena) };
+        const nome = evento.chave.slice(2);
+        const numerico = nome === 'cols' || nome === 'rows';
+        cenaEmEdicao[nome] = numerico ? (Number(evento.valor) || 0) : evento.valor;
+        repintar(desenhoDoEstado());
+        return null;
+      }
+      if (evento.chave.startsWith('s-') && ficha) {
+        // Os espaços de magia entram no mesmo rascunho da ficha: eles são dela.
+        fichaEmEdicao = JSON.parse(JSON.stringify(fichaEmEdicao ?? ficha));
+        const nivel = Number(evento.chave.slice(2));
+        fichaEmEdicao.slots = (fichaEmEdicao.slots ?? []).map((s, i) =>
+          i === nivel ? { ...s, max: Number(evento.valor) || 0 } : s);
+        repintar(desenhoDoEstado());
+        return null;
+      }
       const onde = {
         'nova-campanha': 'campanha', 'nova-cena': 'cena',
         'nova-ficha': 'ficha', 'nova-peca': 'peca',
@@ -453,6 +603,12 @@ iniciar(
       );
     }
 
+    if (evento.nome === 'escolha' && evento.chave.startsWith('ac-')) {
+      acaoEmEdicao = { ...(acaoEmEdicao ?? {}) };
+      acaoEmEdicao[evento.chave.slice(3)] = evento.valor;
+      repintar(desenhoDoEstado());
+      return null;
+    }
     if (evento.nome === 'escolha' && evento.chave === 'trilha-mesa') {
       return escrever(canal, { op: 'music', command: 'select', preset: evento.valor }).then(
         () => repintar(desenhoDoEstado()),
@@ -497,6 +653,120 @@ iniciar(
     }
 
     if (evento.nome !== 'botao' || canal === null) return null;
+    // `campanha` é nula até alguém criar a mesa, e o único botão que chega aqui
+    // nesse estado é o que a cria. Declarada **antes** de qualquer uso: entre a
+    // linha que a lê e a que a declarava havia uma zona morta, e o erro que ela
+    // produzia era «não consegui criar a cena» — que fala de outra coisa.
+    const ficha = campanha?.sheets.find(s => s.id === fichaAberta);
+    // Os botões por identificador, antes dos de nome fixo.
+    if (campanha && ficha) {
+      const daFicha = (prefixo) => evento.chave.startsWith(prefixo)
+        ? evento.chave.slice(prefixo.length) : null;
+      const magia = daFicha('magia-');
+      if (magia) {
+        fichaEmEdicao = JSON.parse(JSON.stringify(fichaEmEdicao ?? ficha));
+        const tinha = (fichaEmEdicao.spells ?? []).includes(magia);
+        fichaEmEdicao.spells = tinha
+          ? fichaEmEdicao.spells.filter(s => s !== magia)
+          : [...(fichaEmEdicao.spells ?? []), magia];
+        repintar(desenhoDoEstado());
+        return null;
+      }
+      const conjurar = daFicha('conjurar-');
+      if (conjurar) {
+        const entrada = campanha.entries.find(e => e.id === conjurar);
+        return escrever(canal, {
+          op: 'cast', sheet: ficha.id, entry: conjurar, level: entrada?.level ?? 0,
+        }).then(
+          () => repintar(desenhoDoEstado()),
+          erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        );
+      }
+      const usar = daFicha('usar-acao-');
+      if (usar) {
+        return escrever(canal, { op: 'action-use', sheet: ficha.id, id: usar }).then(
+          () => repintar(desenhoDoEstado()),
+          erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        );
+      }
+      const editar = daFicha('editar-acao-');
+      if (editar) {
+        acaoEmEdicao = { ...(ficha.actions ?? []).find(a => a.id === editar) };
+        repintar(desenhoDoEstado());
+        return null;
+      }
+      const tirar = daFicha('tirar-acao-');
+      if (tirar) {
+        return escrever(canal, { op: 'action-remove', sheet: ficha.id, id: tirar }).then(
+          () => repintar(desenhoDoEstado()),
+          erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        );
+      }
+      if (evento.chave === 'gravar-acao' && acaoEmEdicao?.name) {
+        const a = acaoEmEdicao;
+        return escrever(canal, {
+          op: 'action-save', sheet: ficha.id, id: a.id, name: a.name,
+          kind: a.kind ?? 'action', formula: a.formula ?? '',
+          description: a.description ?? '', max: a.max ?? 0, used: a.used ?? 0,
+          recharge: a.recharge ?? 'manual',
+        }).then(
+          () => { acaoEmEdicao = null; repintar(desenhoDoEstado()); },
+          erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        );
+      }
+      if (evento.chave === 'descansar') {
+        return escrever(canal, { op: 'rest', sheet: ficha.id }).then(
+          () => repintar(desenhoDoEstado()),
+          erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        );
+      }
+    }
+    if (campanha && evento.chave.startsWith('editar-verbete-')) {
+      const id = evento.chave.slice('editar-verbete-'.length);
+      verbeteEmEdicao = { ...campanha.entries.find(e => e.id === id) };
+      repintar(desenhoDoEstado());
+      return null;
+    }
+    if (campanha && evento.chave.startsWith('publicar-verbete-')) {
+      const id = evento.chave.slice('publicar-verbete-'.length);
+      const entrada = campanha.entries.find(e => e.id === id);
+      return escrever(canal, {
+        op: 'entry-save', id, name: entrada.name, kind: entrada.kind,
+        level: entrada.level, range: entrada.range, cost: entrada.cost,
+        description: entrada.description, formula: entrada.formula,
+        published: !entrada.published,
+      }).then(
+        () => repintar(desenhoDoEstado()),
+        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+      );
+    }
+    if (evento.chave === 'gravar-verbete' && verbeteEmEdicao?.name) {
+      const v = verbeteEmEdicao;
+      return escrever(canal, {
+        op: 'entry-save', id: v.id, name: v.name, kind: v.kind ?? 'nota',
+        level: v.level ?? 0, range: v.range ?? '', cost: v.cost ?? '',
+        description: v.description ?? '', formula: v.formula ?? '',
+        published: v.published === true,
+      }).then(
+        () => { verbeteEmEdicao = null; repintar(desenhoDoEstado()); },
+        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+      );
+    }
+    if (evento.chave === 'descartar-cena') {
+      cenaEmEdicao = null;
+      repintar(desenhoDoEstado());
+      return null;
+    }
+    if (evento.chave === 'gravar-cena' && cenaEmEdicao && cena) {
+      const c = cenaEmEdicao;
+      return escrever(canal, {
+        op: 'scene-save', id: cena.id, name: c.name, description: c.description ?? '',
+        notes: c.notes ?? '', cols: c.cols, rows: c.rows, cellMeters: cena.cellMeters,
+      }).then(
+        () => { cenaEmEdicao = null; repintar(desenhoDoEstado()); },
+        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+      );
+    }
     if (campanha && evento.chave.startsWith('abrir-ficha-')) {
       fichaAberta = evento.chave.slice('abrir-ficha-'.length);
       repintar(desenhoDoEstado());
@@ -525,9 +795,6 @@ iniciar(
         erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
       );
     }
-    // `campanha` é nula até alguém criar a mesa, e o único botão que chega aqui
-    // nesse estado é o que a cria.
-    const ficha = campanha?.sheets.find(s => s.id === fichaAberta);
     const quanto = Number(rascunho.dano) || 0;
     const pedido = evento.chave === 'rolar' ? { op: 'roll', formula, label: 'Dados' }
       : evento.chave === 'iniciativa-proximo' ? { op: 'initiative-next' }
