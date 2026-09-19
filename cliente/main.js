@@ -49,14 +49,32 @@ function interfaceMod(id, titulo, intervalo = 4000) {
   // quadro.
   let canalAtual = null;
   let pintando = false;
+  let pendente = null;
 
+  /**
+   * Uma pintura de cada vez, e **nenhuma perdida**.
+   *
+   * Dois `regiao` em voo chegariam fora de ordem, e o desenho de trás apagaria
+   * o da frente — por isso a segunda espera. Mas a primeira versão **descartava**
+   * a segunda, e dois eventos seguidos (escolher a densidade e a fonte, no mesmo
+   * quadro) perdiam o desenho do segundo: a tela ficava mostrando a escolha
+   * anterior, e só o relógio a corrigia, quatro segundos depois.
+   *
+   * Guardar a última e pintá-la ao fim da que está em voo é o que resolve. É a
+   * mesma forma do aviso que chega durante uma colheita: o que não cabe agora
+   * não se joga fora, fica marcado.
+   */
   const desenhar = async partes => {
-    // Uma pintura de cada vez: dois `regiao` em voo chegariam fora de ordem, e
-    // o desenho de trás apagaria o da frente.
-    if (pintando) return;
+    if (pintando) { pendente = partes; return; }
     pintando = true;
     try {
-      await ui.regiao([cabecalho(titulo), ...partes]);
+      let atual = partes;
+      for (;;) {
+        pendente = null;
+        await ui.regiao([cabecalho(titulo), ...atual]);
+        if (!pendente) return;
+        atual = pendente;
+      }
     } finally {
       pintando = false;
     }
@@ -125,8 +143,12 @@ function interfaceMod(id, titulo, intervalo = 4000) {
 // manda `token-move`, e é o servidor que decide se quem arrastou podia — este
 // lado não tem autoridade nenhuma e não finge ter.
 //
-// O que continua fora está na emenda de 19/09 do ADR 0049: escolher um arquivo
-// do disco, que é como uma cena nova entraria. As cenas já enviadas aparecem.
+// Enviar o mapa de uma cena voltou junto: a pessoa aperta, o seletor é do
+// sistema, e este MOD recebe um identificador — não um caminho. Os bytes saem
+// do produto em pedaços e entram pelo `image-part` que o servidor já tinha.
+//
+// A gestão também: criar campanha, criar e salvar cena, criar ficha, pôr peça,
+// mexer em vida e condições, e a ordem de iniciativa.
 
 const { texto, cabecalho, lista, campo, escolha, botao, linha, request, iniciar } =
   interfaceMod('seele/mesa', 'MESA', 2000);
@@ -139,6 +161,27 @@ const LADO_MAXIMO = 1024;
 let ultimo = null;
 let aviso = '';
 let formula = '1d20';
+/** O que está sendo escrito nos campos de criação e edição. */
+const rascunho = { campanha: '', cena: '', ficha: '', peca: '', dano: '', entrada: '' };
+/** A ficha sendo editada, campo a campo, até alguém gravar. */
+let fichaEmEdicao = null;
+/** Pintar parede em vez de arrastar peça: a mesma tela, dois modos. */
+let modoParede = false;
+
+/** As trilhas que o servidor conhece. `inherit` é «o que a cena disser». */
+const TRILHAS = [
+  { valor: 'silence', dentro: 'SILÊNCIO' },
+  { valor: 'exploration', dentro: 'EXPLORAÇÃO' },
+  { valor: 'mystery', dentro: 'MISTÉRIO' },
+  { valor: 'battle', dentro: 'COMBATE' },
+];
+
+/** Os seis atributos, na ordem de sempre. */
+const ATRIBUTOS = [['str', 'FOR'], ['dex', 'DES'], ['con', 'CON'], ['int', 'INT'], ['wis', 'SAB'], ['cha', 'CAR']];
+/** Qual ficha está aberta para edição, e qual cena para ajuste. */
+let fichaAberta = null;
+/** Quanto cabe num fragmento de imagem deste servidor. */
+const FRAGMENTO = 7000;
 /** A peça sendo arrastada e onde ela está agora, para a tela acompanhar. */
 let arrastando = null;
 
@@ -221,17 +264,110 @@ function osControles(campanha) {
   const partes = [
     linha([campo('formula', 'DADOS', formula), botao('rolar', 'ROLAR')]),
   ];
+  const cena = cenaAtiva(campanha);
   if (ultimo.isGM) {
     const cenas = campanha.scenes.map(c => ({ valor: String(c.id), dentro: c.name }));
     if (cenas.length) {
       partes.push(escolha('cena', 'CENA EM CIMA DA MESA', String(campanha.active ?? ''), cenas));
     }
     partes.push(linha([
+      campo('nova-cena', 'CENA NOVA', rascunho.cena),
+      botao('criar-cena', 'CRIAR CENA', !rascunho.cena),
+    ]));
+    if (cena) {
+      partes.push(linha([
+        { forma: 'arquivo', chave: 'mapa', dentro: 'ENVIAR MAPA' },
+        campo('nova-peca', 'PEÇA NOVA', rascunho.peca),
+        botao('criar-peca', 'PÔR PEÇA', !rascunho.peca || cena.kind !== 'map'),
+      ]));
+      // **Dois modos na mesma tela.** Arrastar move peça; pintar troca parede.
+      // Um modo é mais honesto que adivinhar pela figura sob o dedo: quem pinta
+      // uma parede quer pintar mesmo onde há peça.
+      partes.push(linha([
+        botao('modo-parede', modoParede ? 'PARAR DE PINTAR PAREDE' : 'PINTAR PAREDE'),
+        escolha('trilha', 'TRILHA DA CENA', cena.ambience ?? 'inherit', [
+          { valor: 'inherit', dentro: 'A DA MESA' }, ...TRILHAS,
+        ]),
+      ]));
+    }
+    partes.push(escolha('trilha-mesa', 'TRILHA DA MESA', campanha.music?.preset ?? 'silence', TRILHAS));
+    partes.push(linha([
+      campo('nova-entrada', 'VERBETE NOVO', rascunho.entrada),
+      botao('criar-entrada', 'CRIAR VERBETE', !rascunho.entrada),
+    ]));
+    partes.push(linha([
+      campo('nova-ficha', 'FICHA NOVA', rascunho.ficha),
+      botao('criar-ficha', 'CRIAR FICHA', !rascunho.ficha),
+    ]));
+    partes.push(linha([
       botao('iniciativa-proximo', 'PRÓXIMO TURNO', !campanha.initiative.length),
       botao('iniciativa-limpar', 'LIMPAR INICIATIVA', !campanha.initiative.length),
     ]));
   }
   if (aviso) partes.push(texto(aviso));
+  return partes;
+}
+
+/** A ficha aberta: vida, condições, os campos dela e o retrato. */
+function aFichaAberta(campanha) {
+  const ficha = campanha.sheets.find(s => s.id === fichaAberta);
+  if (!ficha) return [];
+  const edit = fichaEmEdicao ?? ficha;
+  const mudou = fichaEmEdicao !== null && JSON.stringify(fichaEmEdicao) !== JSON.stringify(ficha);
+  const partes = [
+    cabecalho('FICHA · ' + ficha.name),
+    texto('PV ' + ficha.hp + '/' + ficha.maxHp + ' · CA ' + ficha.ac),
+    linha([
+      campo('dano', 'QUANTO', rascunho.dano),
+      botao('ferir', 'FERIR', !rascunho.dano),
+      botao('curar', 'CURAR', !rascunho.dano),
+    ]),
+    linha([
+      botao('condicao-atordoado', ficha.conditions?.includes('stunned') ? 'TIRAR ATORDOADO' : 'ATORDOAR'),
+      botao('iniciativa-add', 'PÔR NA INICIATIVA'),
+      botao('fechar-ficha', 'FECHAR'),
+    ]),
+  ];
+  if (ficha.portrait) {
+    partes.push({
+      forma: 'midia', chave: 'retrato:' + ficha.id,
+      doServidor: {
+        canal: ultimo.canal,
+        pedido: { op: 'portrait-asset', sheet: ficha.id },
+        campo: 'image',
+      },
+      descricao: 'Retrato de ' + ficha.name,
+    });
+  }
+  partes.push({ forma: 'arquivo', chave: 'retrato', dentro: 'ENVIAR RETRATO' });
+
+  // **A ficha inteira, e não só a vida.** Editar só os pontos de vida seria
+  // outra forma de tela de leitura: o que se muda numa mesa é a ficha.
+  partes.push(
+    linha([
+      campo('f-name', 'NOME', edit.name),
+      campo('f-className', 'CLASSE', edit.className ?? ''),
+      campo('f-level', 'NÍVEL', edit.level),
+    ]),
+    linha([
+      campo('f-ancestry', 'ANCESTRALIDADE', edit.ancestry ?? ''),
+      campo('f-background', 'ANTECEDENTES', edit.background ?? ''),
+    ]),
+    linha([
+      campo('f-hp', 'PV', edit.hp),
+      campo('f-maxHp', 'PV MÁXIMO', edit.maxHp),
+      campo('f-ac', 'CA', edit.ac),
+      campo('f-speed', 'DESLOCAMENTO', edit.speed),
+    ]),
+    linha(ATRIBUTOS.map(([chave, rotulo]) => campo('a-' + chave, rotulo, edit.abilities?.[chave] ?? 10))),
+    campo('f-inventory', 'INVENTÁRIO', edit.inventory ?? ''),
+    campo('f-skills', 'PERÍCIAS', edit.skills ?? ''),
+    campo('f-notes', 'NOTAS', edit.notes ?? ''),
+    linha([
+      botao('gravar-ficha', mudou ? 'GRAVAR FICHA' : 'GRAVADA', !mudou),
+      botao('descartar-ficha', 'DESCARTAR', !mudou),
+    ]),
+  );
   return partes;
 }
 
@@ -247,7 +383,10 @@ function oResto(campanha) {
   ];
   for (const ficha of campanha.sheets) {
     partes.push(
-      cabecalho(ficha.name),
+      linha([
+        cabecalho(ficha.name),
+        botao('abrir-ficha-' + ficha.id, 'ABRIR'),
+      ]),
       texto(nomeDe(ficha.owner) + ' · nível ' + ficha.level + ' · ' + (ficha.className || 'Classe livre')),
       texto('PV ' + ficha.hp + '/' + ficha.maxHp + ' · temporários ' + (ficha.tempHp || 0) + ' · CA ' + ficha.ac),
       lista(Object.entries(ficha.abilities || {}).map(([chave, valor]) =>
@@ -275,7 +414,16 @@ function desenhoDoEstado() {
   if (!ultimo) return [texto('Consultando a campanha deste canal…')];
   const campanha = ultimo.campaign;
   if (!campanha) {
-    return [texto('Nenhuma campanha neste canal. Quem for mestrar cria a mesa pelo servidor.')];
+    // **Criar a mesa é daqui.** Antes isto dizia «crie pelo servidor», que é o
+    // mesmo que não oferecer: não há «pelo servidor» para quem usa o produto.
+    return [
+      texto('Nenhuma campanha neste canal.'),
+      linha([
+        campo('nova-campanha', 'NOME DA CAMPANHA', rascunho.campanha),
+        botao('criar-campanha', 'CRIAR MESA', !rascunho.campanha),
+      ]),
+      ...(aviso ? [texto(aviso)] : []),
+    ];
   }
   return [
     cabecalho(campanha.name),
@@ -283,8 +431,44 @@ function desenhoDoEstado() {
       + ' · sistema ' + campanha.system + ' · GM ' + nomeDe(campanha.gm)),
     ...oTabuleiro(campanha),
     ...osControles(campanha),
+    ...aFichaAberta(campanha),
     ...oResto(campanha),
   ];
+}
+
+/**
+ * Manda uma imagem escolhida ao servidor, em fragmentos.
+ *
+ * Os bytes nunca estão inteiros aqui: o produto os entrega em pedaços, e cada
+ * pedaço é recortado no tamanho que este servidor aceita. O primeiro fragmento
+ * carrega o prefixo `data:`, que é o que o servidor confere.
+ */
+async function enviarImagem(canal, escolhido, montarPedido) {
+  if (escolhido.papel !== 'imagem') throw new Error('Escolha uma imagem.');
+  const prefixo = 'data:' + escolhido.tipo + ';base64,';
+  const total = prefixo.length + Math.ceil(escolhido.bytes / 3) * 4;
+  // Este servidor quer saber **quantos** fragmentos virão, e não o tamanho.
+  const fragmentos = Math.ceil(total / FRAGMENTO);
+  const marca = 'envio-' + escolhido.id;
+
+  let sobra = prefixo;
+  let lidos = 0;
+  for (let indice = 0; indice < fragmentos; indice += 1) {
+    while (sobra.length < FRAGMENTO && lidos < escolhido.bytes) {
+      const pedaco = await SeeleUI.pedaco(escolhido.id, lidos);
+      if (!pedaco) throw new Error('O arquivo acabou antes do esperado.');
+      lidos += (pedaco.length / 4) * 3;
+      sobra += pedaco;
+    }
+    const parte = sobra.slice(0, FRAGMENTO);
+    sobra = sobra.slice(parte.length);
+    await escrever(canal, montarPedido({
+      upload: marca, total: fragmentos, index: indice, part: parte,
+    }));
+  }
+  // Devolvido na hora: dez megabytes presos até a saída seriam dez megabytes
+  // que ninguém mais vai ler.
+  await SeeleUI.soltar(escolhido.id);
 }
 
 /** Da tela para a grade, e dentro dos limites da cena. */
@@ -312,19 +496,57 @@ iniciar(
   },
   async () => { ultimo = null; arrastando = null; },
   (evento, canal, repintar) => {
-    if (!ultimo?.campaign) return null;
+    if (!ultimo) return null;
     const campanha = ultimo.campaign;
+    const cena = campanha ? cenaAtiva(campanha) : null;
+    // Sem campanha só há um caminho: criar uma. Os outros pedem uma mesa.
+    if (!campanha && !(evento.nome === 'campo' || evento.chave === 'criar-campanha')) {
+      return null;
+    }
 
-    if (evento.nome === 'campo' && evento.chave === 'formula') {
-      formula = evento.valor;
+    if (evento.nome === 'campo') {
+      if (evento.chave === 'formula') { formula = evento.valor; return null; }
+      const ficha = campanha?.sheets.find(s => s.id === fichaAberta);
+      if (ficha && (evento.chave.startsWith('f-') || evento.chave.startsWith('a-'))) {
+        // O rascunho da ficha nasce do que o servidor tem, e daí em diante é
+        // dele: sem isso a consulta de dois segundos apagaria o que está sendo
+        // digitado, e o foco ficaria numa caixa cujo valor este MOD trocou.
+        fichaEmEdicao = JSON.parse(JSON.stringify(fichaEmEdicao ?? ficha));
+        if (evento.chave.startsWith('a-')) {
+          fichaEmEdicao.abilities = { ...fichaEmEdicao.abilities };
+          fichaEmEdicao.abilities[evento.chave.slice(2)] = Number(evento.valor) || 0;
+        } else {
+          const nome = evento.chave.slice(2);
+          const numerico = ['level', 'hp', 'maxHp', 'ac', 'speed'].includes(nome);
+          fichaEmEdicao[nome] = numerico ? (Number(evento.valor) || 0) : evento.valor;
+        }
+        repintar(desenhoDoEstado());
+        return null;
+      }
+      const onde = {
+        'nova-campanha': 'campanha', 'nova-cena': 'cena',
+        'nova-ficha': 'ficha', 'nova-peca': 'peca',
+        'nova-entrada': 'entrada', dano: 'dano',
+      }[evento.chave];
+      if (!onde) return null;
+      rascunho[onde] = evento.valor;
+      repintar(desenhoDoEstado());
       return null;
     }
 
     if (evento.nome === 'traco') {
-      const cena = cenaAtiva(campanha);
       if (!cena || cena.kind !== 'map') return null;
       const x = naGrade(evento.x, cena.cols);
       const y = naGrade(evento.y, cena.rows);
+      if (modoParede) {
+        // No modo parede o `alvo` não importa: o que vale é a casa, e pintar
+        // sobre uma peça é exatamente o que quem pinta uma parede quer.
+        if (evento.fase !== 'comecou') return null;
+        return escrever(canal, { op: 'wall', scene: cena.id, x, y }).then(
+          () => repintar(desenhoDoEstado()),
+          erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        );
+      }
       if (evento.fase === 'comecou') {
         // `alvo` é a chave da figura que o dedo pegou. Sem ele, este lado teria
         // de refazer o acerto que o produto acabou de fazer para pintar.
@@ -364,6 +586,18 @@ iniciar(
       );
     }
 
+    if (evento.nome === 'escolha' && evento.chave === 'trilha-mesa') {
+      return escrever(canal, { op: 'music', command: 'select', preset: evento.valor }).then(
+        () => repintar(desenhoDoEstado()),
+        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+      );
+    }
+    if (evento.nome === 'escolha' && evento.chave === 'trilha' && cena) {
+      return escrever(canal, { op: 'scene-music', id: cena.id, preset: evento.valor }).then(
+        () => repintar(desenhoDoEstado()),
+        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+      );
+    }
     if (evento.nome === 'escolha' && evento.chave === 'cena') {
       aviso = 'trocando a cena…';
       repintar(desenhoDoEstado());
@@ -373,15 +607,98 @@ iniciar(
       );
     }
 
+    if (evento.nome === 'arquivo') {
+      // Cancelar é uma resposta: `null` quer dizer que o seletor foi fechado.
+      if (!evento.arquivo) {
+        aviso = evento.porque ?? 'nenhum arquivo escolhido';
+        repintar(desenhoDoEstado());
+        return null;
+      }
+      if (canal === null) return null;
+      const paraRetrato = evento.chave === 'retrato';
+      if (paraRetrato && !fichaAberta) return null;
+      if (!paraRetrato && !cena) return null;
+      aviso = paraRetrato ? 'enviando o retrato…' : 'enviando o mapa…';
+      repintar(desenhoDoEstado());
+      const enviando = paraRetrato
+        ? enviarImagem(canal, evento.arquivo, (extra) => ({ op: 'portrait-part', sheet: fichaAberta, ...extra }))
+        : enviarImagem(canal, evento.arquivo, (extra) => ({ op: 'image-part', scene: cena.id, ...extra }));
+      return enviando.then(
+        () => { aviso = paraRetrato ? 'retrato enviado' : 'mapa enviado'; repintar(desenhoDoEstado()); },
+        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+      );
+    }
+
     if (evento.nome !== 'botao' || canal === null) return null;
+    if (campanha && evento.chave.startsWith('abrir-ficha-')) {
+      fichaAberta = evento.chave.slice('abrir-ficha-'.length);
+      repintar(desenhoDoEstado());
+      return null;
+    }
+    if (evento.chave === 'fechar-ficha') {
+      fichaAberta = null;
+      fichaEmEdicao = null;
+      repintar(desenhoDoEstado());
+      return null;
+    }
+    if (evento.chave === 'descartar-ficha') {
+      fichaEmEdicao = null;
+      repintar(desenhoDoEstado());
+      return null;
+    }
+    if (evento.chave === 'modo-parede') {
+      modoParede = !modoParede;
+      repintar(desenhoDoEstado());
+      return null;
+    }
+    if (evento.chave === 'gravar-ficha' && fichaEmEdicao) {
+      const enviada = fichaEmEdicao;
+      return escrever(canal, { op: 'sheet-save', sheet: enviada }).then(
+        () => { fichaEmEdicao = null; aviso = 'ficha gravada'; repintar(desenhoDoEstado()); },
+        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+      );
+    }
+    // `campanha` é nula até alguém criar a mesa, e o único botão que chega aqui
+    // nesse estado é o que a cria.
+    const ficha = campanha?.sheets.find(s => s.id === fichaAberta);
+    const quanto = Number(rascunho.dano) || 0;
     const pedido = evento.chave === 'rolar' ? { op: 'roll', formula, label: 'Dados' }
       : evento.chave === 'iniciativa-proximo' ? { op: 'initiative-next' }
         : evento.chave === 'iniciativa-limpar' ? { op: 'initiative-clear' }
-          : null;
+          : evento.chave === 'criar-campanha'
+            ? { op: 'setup', name: rascunho.campanha, system: 'free', gm: String(ultimo.me ?? '') }
+            : evento.chave === 'criar-cena' ? { op: 'scene-create', name: rascunho.cena, kind: 'map' }
+              : evento.chave === 'criar-ficha' ? { op: 'sheet-create', name: rascunho.ficha, owner: String(ultimo.me ?? '') }
+                : evento.chave === 'criar-entrada'
+                  ? { op: 'entry-save', name: rascunho.entrada, kind: 'nota', level: 0 }
+                : evento.chave === 'criar-peca' && cena
+                  ? { op: 'token-add', scene: cena.id, name: rascunho.peca, x: 0, y: 0 }
+                  : evento.chave === 'ferir' && ficha
+                    ? { op: 'vitality', sheet: ficha.id, kind: 'damage', amount: quanto }
+                    : evento.chave === 'curar' && ficha
+                      ? { op: 'vitality', sheet: ficha.id, kind: 'heal', amount: quanto }
+                      : evento.chave === 'condicao-atordoado' && ficha
+                        ? {
+                            op: 'conditions',
+                            sheet: ficha.id,
+                            conditions: ficha.conditions?.includes('stunned')
+                              ? ficha.conditions.filter(c => c !== 'stunned')
+                              : [...(ficha.conditions ?? []), 'stunned'],
+                          }
+                        : evento.chave === 'iniciativa-add' && ficha
+                          ? { op: 'initiative-add', name: ficha.name, value: 10 }
+                          : null;
     if (!pedido) return null;
     aviso = '';
     return escrever(canal, pedido).then(
-      () => repintar(desenhoDoEstado()),
+      () => {
+        // O que foi criado saiu do rascunho: deixá-lo cheio faria o botão
+        // continuar ligado e a próxima criação repetir o nome.
+        if (evento.chave.startsWith('criar-')) {
+          rascunho[evento.chave.slice('criar-'.length)] = '';
+        }
+        repintar(desenhoDoEstado());
+      },
       erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
     );
   },
