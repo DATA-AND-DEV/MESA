@@ -856,22 +856,43 @@ async function enviarImagem(canal, escolhido, montarPedido) {
 
   let sobra = prefixo;
   let lidos = 0;
-  for (let indice = 0; indice < fragmentos; indice += 1) {
-    while (sobra.length < FRAGMENTO && lidos < escolhido.bytes) {
-      const pedaco = await SeeleUI.pedaco(escolhido.id, lidos);
-      if (!pedaco) throw new Error('O arquivo acabou antes do esperado.');
-      lidos += (pedaco.length / 4) * 3;
-      sobra += pedaco;
+  // **`finally`, e não depois do laço** — um dos riscos que a auditoria de
+  // 20/09/2026 mandou reproduzir: «MESA chama `soltar` apenas depois do laço
+  // bem-sucedido. Verificar liberação em `finally`.»
+  //
+  // Um envio que falha no meio — fragmento recusado, revisão trocada, disco
+  // cheio do outro lado — deixava os bytes presos no produto até a saída da
+  // sessão. Dez megabytes que ninguém mais vai ler, segurados por um caminho
+  // de erro que ninguém percorre de propósito.
+  //
+  // O `finally` cobre os três desfechos: o laço terminou, o laço lançou, ou
+  // alguém desistiu. O próprio `soltar` é idempotente do lado do produto, e
+  // uma falha nele não pode esconder a falha que nos trouxe aqui.
+  try {
+    for (let indice = 0; indice < fragmentos; indice += 1) {
+      while (sobra.length < FRAGMENTO && lidos < escolhido.bytes) {
+        const pedaco = await SeeleUI.pedaco(escolhido.id, lidos);
+        if (!pedaco) throw new Error('O arquivo acabou antes do esperado.');
+        lidos += (pedaco.length / 4) * 3;
+        sobra += pedaco;
+      }
+      const parte = sobra.slice(0, FRAGMENTO);
+      sobra = sobra.slice(parte.length);
+      await escrever(canal, montarPedido({
+        upload: marca, total: fragmentos, index: indice, part: parte,
+      }));
     }
-    const parte = sobra.slice(0, FRAGMENTO);
-    sobra = sobra.slice(parte.length);
-    await escrever(canal, montarPedido({
-      upload: marca, total: fragmentos, index: indice, part: parte,
-    }));
+  } finally {
+    // Devolvido na hora: dez megabytes presos até a saída seriam dez megabytes
+    // que ninguém mais vai ler.
+    try {
+      await SeeleUI.soltar(escolhido.id);
+    } catch (erro) {
+      // Uma falha ao devolver não pode substituir a falha que a trouxe: quem
+      // está esperando o erro do envio precisa do erro do envio.
+      console.error('MESA: o arquivo não foi devolvido: ' + (erro.message || erro));
+    }
   }
-  // Devolvido na hora: dez megabytes presos até a saída seriam dez megabytes
-  // que ninguém mais vai ler.
-  await SeeleUI.soltar(escolhido.id);
 }
 
 /** Da tela para a grade, e dentro dos limites da cena. */
@@ -932,8 +953,49 @@ function escrever(canal, pedido, marca = proximaMarca()) {
   });
 }
 
+/**
+ * O canal a que o que está sendo editado pertence.
+ *
+ * # Por que ele existe
+ *
+ * Um dos riscos que a auditoria de 20/09/2026 mandou reproduzir: «Rascunhos e
+ * respostas em voo atravessando mudança de canal: o helper consulta
+ * periodicamente, e o evento usa `canalAtual`. Prender abertura/edição à
+ * entidade e ao canal de origem.»
+ *
+ * Uma campanha é **por canal**. Tudo o que está sendo editado — o nome da mesa
+ * nova, a cena, a ficha aberta, a ação, o verbete — pertence à campanha daquele
+ * canal. Trocar de canal e continuar com a ficha `sheet-3` aberta é ter aberta
+ * a ficha de outra mesa, com o mesmo número.
+ *
+ * A casca já impede desenhar a resposta do canal anterior. O que faltava era
+ * impedir a **edição** de atravessar, e é isto.
+ */
+let canalDaEdicao = null;
+
+/** Esquece o que estava sendo editado, porque ele era de outro canal. */
+function largarAEdicao() {
+  fichaAberta = null;
+  fichaEmEdicao = null;
+  acaoEmEdicao = null;
+  verbeteEmEdicao = null;
+  cenaEmEdicao = null;
+  arrastando = null;
+  modoParede = false;
+  abaAberta = 'tabuleiro';
+  for (const chave of Object.keys(rascunho)) {
+    rascunho[chave] = chave === 'sistema' ? 'free' : '';
+  }
+  aviso = '';
+}
+
 iniciar(
   async (snapshot, canal) => {
+    // **Antes de perguntar**, e não depois de responder: se o canal mudou, o
+    // que estava sendo editado é de outra mesa, e desenhá-lo por um ciclo já
+    // seria mostrar a ficha errada.
+    if (canalDaEdicao !== null && canalDaEdicao !== canal) largarAEdicao();
+    canalDaEdicao = canal;
     const resposta = await request(canal, { op: 'view' });
     ultimo = { ...resposta, presentes: snapshot.presentes, canal };
     // A entrada, uma vez por sessão. Registrá-la a cada consulta seria uma
@@ -951,7 +1013,8 @@ iniciar(
   },
   async () => {
     ultimo = null;
-    arrastando = null;
+    canalDaEdicao = null;
+    largarAEdicao();
     telas.mesa = null;
     telas.criar = null;
     entradaRegistrada = false;
