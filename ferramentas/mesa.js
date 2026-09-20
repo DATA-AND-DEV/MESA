@@ -193,7 +193,27 @@ function tabuleiro(cena) {
 
 function oTabuleiro(campanha) {
   const cena = cenaAtiva(campanha);
-  if (!cena) return [texto('Nenhuma cena em cima da mesa.')];
+  // **Uma mesa vazia é um convite, e não um aviso.** A frase anterior —
+  // «Nenhuma cena em cima da mesa» — dizia o que falta a quem já sabe, e nada
+  // a quem abriu isto pela primeira vez. Quem mestra recebe o próximo passo;
+  // quem joga recebe o motivo de a mesa estar vazia.
+  if (!cena) {
+    return [caixa([
+      caixa([ultimo.isGM
+        ? 'A mesa está vazia. Crie uma cena abaixo e ela aparece aqui para '
+          + 'todo mundo — um mapa com peças, ou uma ilustração.'
+        : 'A mesa está vazia. Quem mestra põe a cena, e ela aparece aqui.'],
+      { entrelinha: 1.5, larguraMaxima: 440, cor: '#908574' }),
+    ], {
+      preenchimento: 28,
+      alinhamento: 'centro',
+      alinhar: 'centro',
+      distribuir: 'centro',
+      direcao: 'linha',
+      borda: { largura: 1, estilo: 'tracejada', cor: '#3a322a' },
+      largura: 'total',
+    })];
+  }
   const partes = [cabecalho(cena.name)];
   if (cena.kind === 'map') {
     // A imagem da cena vem da metade de servidor deste MOD e entra **dentro**
@@ -496,12 +516,18 @@ function aPaginaDaMesa() {
 
   const cena = cenaAtiva(campanha);
   return [
+    // **O nome da campanha não se repete.** Ele é o título da página, que o
+    // produto monta na cartela do cabeçalho — `abrirMesa` o entrega. Escrevê-lo
+    // de novo aqui punha a mesma palavra duas vezes em duas tipografias
+    // diferentes, a dois centímetros de distância.
+    //
+    // O que sobra é o que o cabeçalho não diz: qual é o seu papel nesta mesa, e
+    // em que estado ela está.
     caixa([
-      caixa([campanha.name], { corpo: 18, peso: 'forte', crescer: 1 }),
       distintivo([ultimo.isGM ? 'MESTRE' : 'JOGADOR'],
-        { borda: { largura: 1, cor: '#f2521f' }, cor: '#f2521f' }),
+        { borda: { largura: 1, cor: '#f2521f' }, cor: '#f2521f', corpo: 10 }),
       caixa(['sistema ' + campanha.system + ' · GM ' + nomeDe(campanha.gm)
-        + ' · revisão ' + campanha.revision], { corpo: 11, opacidade: 0.7 }),
+        + ' · revisão ' + campanha.revision], { corpo: 11, opacidade: 0.7, crescer: 1 }),
     ], { direcao: 'linha', alinhar: 'centro', intervalo: 10, quebra: 'sim' }),
 
     ...aTrilhaQueToca(campanha, cena),

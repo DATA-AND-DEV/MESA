@@ -253,6 +253,8 @@ function client(w, options = {}) {
     superficies,
     /** A última árvore que o MOD montou numa superfície. */
     superficie: chave => superficies.get(String(chave))?.arvores.at(-1) ?? null,
+    /** O nome que o produto escreve na cartela da janela. */
+    tituloDe: chave => superficies.get(String(chave))?.titulo ?? null,
     /** Os controles de uma superfície, pela chave — como `controles()` na região. */
     controlesDe: chave => {
       const achados = new Map();
@@ -565,7 +567,10 @@ if (manifest.id === 'seele/mesa') {
     // de uma criação que não aconteceu —, e era preciso fechá-lo à mão.
     assert.equal(c.superficie('mesa-criar'), null,
       'o diálogo de criação continuou de pé depois de a campanha ser criada');
-    assert.match(JSON.stringify(c.superficie('mesa')), /A Casa/,
+    // O nome da campanha é a **cartela da janela**, e não uma linha no corpo:
+    // escrito nos dois lugares, ele aparecia duas vezes a dois centímetros de
+    // distância, em duas tipografias.
+    assert.equal(c.tituloDe('mesa'), 'A Casa',
       'a mesa criada não abriu no lugar do diálogo');
 
     // E a página da mesa abre com ela.
@@ -1128,7 +1133,7 @@ if (manifest.id === 'seele/mesa') {
     await assentar(20);
 
     // Chegou na mesa do canal 2.
-    assert.match(oQueAMesaDiz(c), /A Outra/, 'a página não acompanhou a troca de canal');
+    assert.equal(c.tituloDe('mesa'), 'A Outra', 'a página não acompanhou a troca de canal');
 
     // E o que estava sendo editado ficou para trás.
     assert.doesNotMatch(oQueAMesaDiz(c), /Salão desta mesa/,
