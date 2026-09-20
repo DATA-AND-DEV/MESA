@@ -162,11 +162,21 @@ let ultimo = null;
 let aviso = '';
 let formula = '1d20';
 /** O que está sendo escrito nos campos de criação e edição. */
-const rascunho = { campanha: '', cena: '', ficha: '', peca: '', dano: '', entrada: '' };
+const rascunho = { campanha: '', cena: '', ficha: '', peca: '', dano: '', entrada: '',
+  // O sistema e o mestre da campanha a criar. A versão anterior da MESA os
+  // oferecia; a migração passou a fixar `free` e «quem apertou», e ninguém
+  // decidiu isso — ficou por omissão.
+  sistema: 'free', gm: '' };
 /** A ficha sendo editada, campo a campo, até alguém gravar. */
 let fichaEmEdicao = null;
 /** Pintar parede em vez de arrastar peça: a mesma tela, dois modos. */
 let modoParede = false;
+
+/** Os sistemas que este servidor aceita em `setup`. */
+const SISTEMAS = [
+  { valor: 'free', dentro: 'LIVRE' },
+  { valor: 'dnd5e-2014', dentro: 'D&D 5E (2014)' },
+];
 
 /** As trilhas que o servidor conhece. `inherit` é «o que a cena disser». */
 const TRILHAS = [
@@ -207,6 +217,13 @@ const nomeDe = id => {
   const pessoa = ultimo?.presentes?.find(p => String(p.id) === String(id));
   return pessoa?.nickname || pessoa?.apelido || 'Pessoa ' + id;
 };
+
+/** Quem está aqui, na forma que uma `escolha` aceita. */
+const pessoasComoOpcoes = () =>
+  (ultimo?.presentes ?? []).map(p => ({
+    valor: String(p.id),
+    dentro: p.nickname || p.apelido || ('Pessoa ' + p.id),
+  }));
 
 const cenaAtiva = campanha =>
   campanha.scenes.find(c => c.id === campanha.active) ?? null;
@@ -532,10 +549,26 @@ function desenhoDoEstado() {
   if (!campanha) {
     // **Criar a mesa é daqui.** Antes isto dizia «crie pelo servidor», que é o
     // mesmo que não oferecer: não há «pelo servidor» para quem usa o produto.
+    //
+    // **E quem não pode criar não vê um formulário que vai ser recusado.** O
+    // servidor só aceita `setup` de quem administra, e a projeção já diz isso
+    // em `canSetup`. Desenhar o campo e o botão para todo mundo fazia quem não
+    // administra preencher um nome e receber `admin-only` — um erro depois do
+    // trabalho, no lugar de uma explicação antes dele.
+    if (!ultimo.canSetup) {
+      return [
+        texto('Nenhuma campanha neste canal.'),
+        texto('Quem administra este servidor pode criar a mesa. Peça a criação '
+          + 'ou escolha outro canal.'),
+        ...(aviso ? [texto(aviso)] : []),
+      ];
+    }
     return [
       texto('Nenhuma campanha neste canal.'),
       linha([
         campo('nova-campanha', 'NOME DA CAMPANHA', rascunho.campanha),
+        escolha('novo-sistema', 'SISTEMA', rascunho.sistema, SISTEMAS),
+        escolha('novo-gm', 'MESTRE', rascunho.gm || String(ultimo.me ?? ''), pessoasComoOpcoes()),
         botao('criar-campanha', 'CRIAR MESA', !rascunho.campanha),
       ]),
       ...(aviso ? [texto(aviso)] : []),
@@ -593,14 +626,55 @@ async function enviarImagem(canal, escolhido, montarPedido) {
 const naGrade = (valor, teto) => Math.max(0, Math.min(teto - 1, Math.floor(valor / CELULA)));
 
 /**
+ * O contador que dá nome a cada tentativa lógica de escrita.
+ *
+ * **Uma tentativa, um nome; uma repetição, o mesmo nome.** O servidor guarda
+ * os últimos 64 recibos `pessoa:nonce` e devolve a projeção sem reaplicar o
+ * que já aplicou. É isso que faz uma resposta perdida não virar duas
+ * campanhas — e é por isso que repetir uma escrita reaproveita a marca em vez
+ * de sortear outra.
+ */
+let serieDeEscrita = 0;
+/** Um prefixo por execução, para duas janelas não colidirem de nome. */
+const marcaDaExecucao = Math.floor(Math.random() * 0xffffff).toString(36);
+
+/** Uma marca nova, dentro do que `key()` do servidor aceita: `[a-z0-9-]{1,64}`. */
+const proximaMarca = () => 'e-' + marcaDaExecucao + '-' + (++serieDeEscrita);
+
+/**
  * Escreve no servidor e **adota a campanha que ele devolveu**.
  *
  * Toda escrita aqui responde com a projeção nova. Redesenhar com a antiga
  * mostraria o resultado só na consulta seguinte — até dois segundos depois —, e
  * quem rolou um dado ficaria olhando um registro que não tem a rolagem dele.
+ *
+ * # Os dois campos que faltavam, e o que a falta custava
+ *
+ * O servidor recusa **antes de qualquer escrita**: `key(r.nonce)` roda para
+ * toda operação, e `r.revision === c.revision` para toda operação que não seja
+ * a criação. Sem `nonce`, `key(undefined)` falha com `invalid-id`; sem
+ * `revision`, a segunda operação falha com `conflict`.
+ *
+ * Este lado nunca os mandava. A auditoria de 20/09/2026 reproduziu isolado:
+ * `setup` como o cliente enviava devolvia `invalid-id`, e nenhuma campanha
+ * podia ser criada pelo produto. O teste do cliente não pegava porque **ele**
+ * completava os dois campos antes de chamar o servidor — provando um caminho
+ * que o produto não percorre.
+ *
+ * `revision` sai de `ultimo.campaign`, que é a projeção mais recente que este
+ * lado recebeu; `setup` não a manda porque não há campanha de que tirá-la, e o
+ * servidor não a exige nesse caso.
+ *
+ * @param {number} canal O canal desta campanha.
+ * @param {object} pedido O que a operação diz — **sem** `nonce` e `revision`.
+ * @param {string} [marca] A marca de uma tentativa anterior, para repeti-la.
  */
-function escrever(canal, pedido) {
-  return request(canal, pedido).then(resposta => {
+function escrever(canal, pedido, marca = proximaMarca()) {
+  const campanha = ultimo?.campaign;
+  const completo = { ...pedido, nonce: marca };
+  // `setup` cria; as outras exigem concordar com a revisão que está lá.
+  if (pedido.op !== 'setup' && campanha) completo.revision = campanha.revision;
+  return request(canal, completo).then(resposta => {
     if (resposta.campaign) ultimo = { ...ultimo, ...resposta };
     return resposta;
   });
@@ -617,8 +691,20 @@ iniciar(
     if (!ultimo) return null;
     const campanha = ultimo.campaign;
     const cena = campanha ? cenaAtiva(campanha) : null;
-    // Sem campanha só há um caminho: criar uma. Os outros pedem uma mesa.
-    if (!campanha && !(evento.nome === 'campo' || evento.chave === 'criar-campanha')) {
+    // Sem campanha só há dois caminhos: preencher o formulário de criação e
+    // apertar. Os outros pedem uma mesa.
+    if (!campanha && !(evento.nome === 'campo' || evento.nome === 'escolha'
+      || evento.chave === 'criar-campanha')) {
+      return null;
+    }
+
+    // O sistema e o mestre escolhidos antes de existir campanha. Ficam no
+    // rascunho como o nome fica: são a mesma decisão, em três controles.
+    if (evento.nome === 'escolha' && !campanha) {
+      if (evento.chave === 'novo-sistema') rascunho.sistema = evento.valor;
+      else if (evento.chave === 'novo-gm') rascunho.gm = evento.valor;
+      else return null;
+      repintar(desenhoDoEstado());
       return null;
     }
 
@@ -933,7 +1019,12 @@ iniciar(
       : evento.chave === 'iniciativa-proximo' ? { op: 'initiative-next' }
         : evento.chave === 'iniciativa-limpar' ? { op: 'initiative-clear' }
           : evento.chave === 'criar-campanha'
-            ? { op: 'setup', name: rascunho.campanha, system: 'free', gm: String(ultimo.me ?? '') }
+            ? {
+                op: 'setup',
+                name: rascunho.campanha,
+                system: rascunho.sistema || 'free',
+                gm: rascunho.gm || String(ultimo.me ?? ''),
+              }
             : evento.chave === 'criar-cena' ? { op: 'scene-create', name: rascunho.cena, kind: 'map' }
               : evento.chave === 'criar-ficha' ? { op: 'sheet-create', name: rascunho.ficha, owner: String(ultimo.me ?? '') }
                 : evento.chave === 'criar-entrada'
