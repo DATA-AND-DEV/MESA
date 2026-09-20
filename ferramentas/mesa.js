@@ -214,7 +214,10 @@ function oTabuleiro(campanha) {
 
 function osControles(campanha) {
   const partes = [
-    linha([campo('formula', 'DADOS', formula), botao('rolar', 'ROLAR')]),
+    // A rolagem não precisa da largura da mesa: um campo de `1d20` com mil
+    // pixels é um campo que parece esperar outra coisa.
+    caixa([linha([campo('formula', 'DADOS', formula), botao('rolar', 'ROLAR')])],
+      { larguraMaxima: 420 }),
   ];
   const cena = cenaAtiva(campanha);
   if (ultimo.isGM) {
