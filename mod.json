@@ -1,14 +1,21 @@
 {
   "schema": 1,
   "id": "seele/mesa",
-  "version": "2.0.0",
-  "api": 3,
+  "version": "3.0.0",
+  "api": 4,
   "repo": "https://github.com/DATA-AND-DEV/MESA",
   "reach": [
     "regiao",
     "estado da campanha no servidor",
-    "arquivos de mapas e cenas"
+    "arquivos de mapas e cenas",
+    "superficie de jogo",
+    "trilha sonora do pacote"
   ],
   "client": "cliente/main.js",
-  "server": "servidor/main.js"
+  "server": "servidor/main.js",
+  "arquivos": [
+    "som/exploracao.wav",
+    "som/misterio.wav",
+    "som/combate.wav"
+  ]
 }

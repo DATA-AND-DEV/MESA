@@ -17,8 +17,20 @@
 // A gestão também: criar campanha, criar e salvar cena, criar ficha, pôr peça,
 // mexer em vida e condições, e a ordem de iniciativa.
 
-const { texto, cabecalho, lista, campo, escolha, botao, linha, request, iniciar } =
-  interfaceMod('seele/mesa', 'MESA', 2000);
+const {
+  texto, cabecalho, lista, campo, escolha, botao, linha, arquivo, midia,
+  caixa, pilha, grade, separador, espaco,
+  acoes, abas, aba, formulario, textoLongo, numero, distintivo,
+  request, iniciar, temSuperficies, temContribuicoes,
+  pagina, dialogo, contribuir, entrada, avisar,
+} = interfaceMod('seele/mesa', 'MESA', 2000);
+
+/** A aba aberta na página da mesa. */
+let abaAberta = 'tabuleiro';
+/** Os punhos das superfícies de pé. */
+const telas = { mesa: null, criar: null };
+/** A entrada de navegação já foi registrada nesta sessão? */
+let entradaRegistrada = false;
 
 /** O lado de uma célula na tela, em pixels. */
 const CELULA = 26;
@@ -52,6 +64,25 @@ const TRILHAS = [
   { valor: 'mystery', dentro: 'MISTÉRIO' },
   { valor: 'battle', dentro: 'COMBATE' },
 ];
+
+/**
+ * A trilha de cada ambiente, como arquivo **deste pacote**.
+ *
+ * A auditoria de 20/09/2026 anotou o vão: «As escolhas de trilha alteram
+ * estado no servidor, mas o cliente atual não declara tocador de som nem
+ * sintetizador equivalente ao anterior.» O estado ia e ninguém ouvia nada.
+ *
+ * Os arquivos vêm no pacote e são declarados no `mod.json` — um som que o
+ * manifesto não nomeia não é servido, e essa é a regra que impede um MOD de
+ * tocar bytes que ninguém reviu. São laços curtos e de baixa taxa de
+ * amostragem: ambientação, e não acervo. `silence` não tem arquivo porque
+ * silêncio não é um som.
+ */
+const TRILHAS_EM_ARQUIVO = {
+  exploration: 'som/exploracao.wav',
+  mystery: 'som/misterio.wav',
+  battle: 'som/combate.wav',
+};
 
 /** Os tipos de ação e as recuperações que o servidor conhece. */
 const TIPOS_DE_ACAO = [
@@ -112,6 +143,21 @@ function tabuleiro(cena) {
   const largura = Math.min(cena.cols * CELULA, LADO_MAXIMO);
   const altura = Math.min(cena.rows * CELULA, LADO_MAXIMO);
   const figuras = [];
+  // **O mapa é o fundo desta tela, e não uma imagem ao lado dela.**
+  //
+  // A auditoria de 20/09/2026 anotou: «O mapa é montado como mídia separada do
+  // canvas, em vez de fundo sob as peças.» Um `<img>` ao lado de um `<canvas>`
+  // é um mapa que não tem relação nenhuma com onde as peças estão — as
+  // coordenadas ficam em dois planos que ninguém alinha.
+  const fundo = cena.asset
+    ? {
+      doServidor: {
+        canal: ultimo.canal,
+        pedido: { op: 'asset', scene: cena.id },
+        campo: 'image',
+      },
+    }
+    : null;
 
   // A grade. Linhas não são pegas — elas são régua, e pegá-las roubaria o toque
   // de toda peça em cima delas.
@@ -139,24 +185,28 @@ function tabuleiro(cena) {
       dentro: (peca.name || '').slice(0, 6), corpo: 9, cor: '#eae3cf',
     });
   }
-  return { forma: 'tela', chave: 'tabuleiro', largura, altura, figuras };
+  return {
+    forma: 'tela', chave: 'tabuleiro', largura, altura, figuras,
+    ...(fundo ? { fundo } : {}),
+  };
 }
 
 function oTabuleiro(campanha) {
   const cena = cenaAtiva(campanha);
   if (!cena) return [texto('Nenhuma cena em cima da mesa.')];
   const partes = [cabecalho(cena.name)];
-  if (cena.asset) {
-    // A imagem da cena vem da metade de servidor deste MOD. O produto a busca,
-    // reconhece o formato pelos bytes e monta — a janela de quem joga não vai
-    // buscar bytes na rede de ninguém.
-    partes.push({
-      forma: 'midia', chave: 'cena:' + cena.id,
+  if (cena.kind === 'map') {
+    // A imagem da cena vem da metade de servidor deste MOD e entra **dentro**
+    // da tela, sob as peças. Ver `tabuleiro`.
+    partes.push(tabuleiro(cena));
+  } else if (cena.asset) {
+    // Uma ilustração não é tabuleiro: ela não tem grade nem peça, e por isso
+    // continua sendo mídia — só que no lugar dela, e não ao lado de um mapa.
+    partes.push(midia('cena:' + cena.id, {
       doServidor: { canal: ultimo.canal, pedido: { op: 'asset', scene: cena.id }, campo: 'image' },
-      descricao: 'Mapa de ' + cena.name,
-    });
+      descricao: 'Ilustração de ' + cena.name,
+    }));
   }
-  if (cena.kind === 'map') partes.push(tabuleiro(cena));
   if (cena.description) partes.push(texto(cena.description));
   if (ultimo.isGM && cena.notes) partes.push(texto('Notas do GM: ' + cena.notes));
   return partes;
@@ -371,6 +421,14 @@ function aCenaEmAjuste(campanha) {
   ];
 }
 
+/**
+ * A iniciativa e o resto, para a faixa de um SEELE sem superfícies.
+ *
+ * Na página, cada um destes assuntos tem a aba dele: `asFichas`, `osVerbetes`
+ * e `oRegistro`. Esta função é o caminho de compatibilidade, e ela continua
+ * sendo a lista longa que a auditoria descreveu — porque sem superfícies a
+ * lista longa era tudo o que havia.
+ */
 function oResto(campanha) {
   const partes = [
     cabecalho('Iniciativa · rodada ' + campanha.round),
@@ -408,6 +466,333 @@ function oResto(campanha) {
     lista(campanha.log.slice(-8).reverse().map(l => nomeDe(l.person) + ': ' + l.text)),
   );
   return partes;
+}
+
+// ------------------------------------------------- a mesa como espaço
+
+/**
+ * A página da mesa: abas para o tabuleiro, as fichas, o compêndio e o registro.
+ *
+ * # O achado que ela responde
+ *
+ * U01 e U25 são a mesma coisa vista por fora e por dentro: «jogar exige rolar
+ * um rodapé» de 240px, e «MESA não cria campanha». O segundo era o contrato de
+ * escrita; o primeiro era isto.
+ *
+ * Uma mesa de RPG tem quatro assuntos que não cabem numa lista só — o que está
+ * em cima da mesa, quem está jogando, o que o mundo tem, e o que aconteceu — e
+ * empilhá-los num rodapé faz cada um deles estar a uma rolagem de distância dos
+ * outros três. As abas os separam sem escondê-los, e **só a aberta é montada**:
+ * um tabuleiro com sessenta peças não é desenhado enquanto alguém lê o
+ * compêndio.
+ */
+function aPaginaDaMesa() {
+  if (!ultimo) return [texto('Consultando a campanha deste canal…')];
+  const campanha = ultimo.campaign;
+  if (!campanha) return oConvite();
+
+  const cena = cenaAtiva(campanha);
+  return [
+    caixa([
+      caixa([campanha.name], { corpo: 18, peso: 'forte', crescer: 1 }),
+      distintivo([ultimo.isGM ? 'MESTRE' : 'JOGADOR'],
+        { borda: { largura: 1, cor: '#f2521f' }, cor: '#f2521f' }),
+      caixa(['sistema ' + campanha.system + ' · GM ' + nomeDe(campanha.gm)
+        + ' · revisão ' + campanha.revision], { corpo: 11, opacidade: 0.7 }),
+    ], { direcao: 'linha', alinhar: 'centro', intervalo: 10, quebra: 'sim' }),
+
+    ...aTrilhaQueToca(campanha, cena),
+
+    abas('aba', abaAberta, [
+      aba('tabuleiro', 'TABULEIRO', [
+        ...oTabuleiro(campanha),
+        ...osControles(campanha),
+        ...aCenaEmAjuste(campanha),
+      ]),
+      aba('fichas', 'FICHAS', [
+        ...aFichaAberta(campanha),
+        ...asFichas(campanha),
+      ]),
+      aba('compendio', 'COMPÊNDIO', [
+        ...oCompendio(campanha),
+        ...osVerbetes(campanha),
+      ]),
+      aba('iniciativa', 'INICIATIVA', aIniciativa(campanha)),
+      aba('registro', 'REGISTRO', oRegistro(campanha)),
+    ]),
+  ];
+}
+
+/**
+ * A trilha que está tocando, e o tocador dela.
+ *
+ * A auditoria anotou: «As escolhas de trilha alteram estado no servidor, mas o
+ * cliente atual não declara tocador de som nem sintetizador equivalente ao
+ * anterior.» O estado ia ao servidor e ninguém ouvia nada.
+ *
+ * O tocador é uma `midia` do produto, com o arquivo que **este pacote** traz —
+ * a única origem de som que a API oferece além do servidor do MOD, e a que faz
+ * sentido para ambientação, que é a mesma para todo mundo.
+ *
+ * `position` e `startedAt` do servidor ficam de fora de propósito: o §8 do
+ * plano é explícito em não prometer sincronismo perfeito, e uma trilha que
+ * finge estar alinhada é pior que uma que toca do começo.
+ */
+function aTrilhaQueToca(campanha, cena) {
+  const daCena = cena?.ambience && cena.ambience !== 'inherit' ? cena.ambience : null;
+  const preset = daCena ?? campanha.music?.preset ?? null;
+  const arquivoDaTrilha = preset ? TRILHAS_EM_ARQUIVO[preset] : null;
+  if (!preset || !arquivoDaTrilha) {
+    return preset
+      ? [caixa(['Trilha escolhida: ' + preset + '. Este pacote não traz o som dela.'],
+        { corpo: 11, opacidade: 0.7 })]
+      : [];
+  }
+  return [caixa([
+    caixa(['TRILHA'], { corpo: 10, peso: 'forte', opacidade: 0.7 }),
+    midia('trilha:' + preset, {
+      fonte: arquivoDaTrilha,
+      descricao: 'Ambientação: ' + preset,
+      tocando: campanha.music?.playing === true,
+    }),
+  ], { intervalo: 6 })];
+}
+
+/** O convite a criar a mesa, ou a explicação de quem não pode. */
+function oConvite() {
+  // **Quem não pode criar não vê um formulário que vai ser recusado.** O
+  // servidor só aceita `setup` de quem administra, e a projeção já diz isso em
+  // `canSetup`. Desenhar o campo e o botão para todo mundo fazia quem não
+  // administra preencher um nome e receber `admin-only` — um erro depois do
+  // trabalho, no lugar de uma explicação antes dele.
+  if (!ultimo.canSetup) {
+    return [
+      texto('Nenhuma campanha neste canal.'),
+      texto('Quem administra este servidor pode criar a mesa. Peça a criação '
+        + 'ou escolha outro canal.'),
+      ...(aviso ? [texto(aviso)] : []),
+    ];
+  }
+  return [
+    texto('Nenhuma campanha neste canal.'),
+    acoes([botao('abrir-criar', 'CRIAR MESA', false, { variante: 'primaria' })]),
+    ...(aviso ? [texto(aviso)] : []),
+  ];
+}
+
+/**
+ * O diálogo de criação: nome, sistema e mestre.
+ *
+ * A auditoria anotou que «a criação fixa sistema `free` e GM atual; a versão
+ * anterior oferecia sistema e GM no diálogo». Fixar os dois não foi uma
+ * decisão: foi o que coube na faixa.
+ */
+function oDialogoDeCriacao() {
+  return [
+    formulario('criar', [
+      campo('nova-campanha', 'NOME DA CAMPANHA', rascunho.campanha),
+      escolha('novo-sistema', 'SISTEMA', rascunho.sistema, SISTEMAS),
+      escolha('novo-gm', 'MESTRE', rascunho.gm || String(ultimo.me ?? ''), pessoasComoOpcoes()),
+      caixa(['O mestre pode ser outra pessoa: quem administra o servidor cria a '
+        + 'mesa, e quem joga com ela a conduz.'], { corpo: 11, opacidade: 0.7 }),
+    ]),
+    ...(aviso ? [caixa([aviso], { corpo: 11, cor: '#f2521f' })] : []),
+    acoes([
+      botao('cancelar-criar', 'CANCELAR', false, { variante: 'discreta' }),
+      espaco(),
+      botao('criar-campanha', 'CRIAR MESA', !rascunho.campanha, { variante: 'primaria' }),
+    ], true),
+  ];
+}
+
+/** As fichas da campanha, uma caixa por ficha. */
+function asFichas(campanha) {
+  const partes = [
+    cabecalho(ultimo.isGM ? 'Fichas da campanha' : 'Suas fichas'),
+  ];
+  if (!campanha.sheets.length) {
+    partes.push(texto('Nenhuma ficha nesta mesa ainda.'));
+    return partes;
+  }
+  partes.push(grade(campanha.sheets.map(ficha => caixa([
+    caixa([
+      caixa([ficha.name], { peso: 'forte', corpo: 14, crescer: 1 }),
+      botao('abrir-ficha-' + ficha.id, fichaAberta === ficha.id ? 'ABERTA' : 'ABRIR',
+        fichaAberta === ficha.id),
+    ], { direcao: 'linha', alinhar: 'centro', intervalo: 8 }),
+    caixa([nomeDe(ficha.owner) + ' · nível ' + ficha.level + ' · '
+      + (ficha.className || 'Classe livre')], { corpo: 11, opacidade: 0.75 }),
+    caixa([
+      distintivo(['PV ' + ficha.hp + '/' + ficha.maxHp]),
+      distintivo(['CA ' + ficha.ac]),
+      ...(ficha.tempHp ? [distintivo(['TEMP ' + ficha.tempHp])] : []),
+    ], { direcao: 'linha', intervalo: 6, quebra: 'sim' }),
+    ...((ficha.conditions || []).length
+      ? [caixa([
+        ...(ficha.conditions || []).map(c => distintivo([c],
+          { borda: { largura: 1, cor: '#FF1A1A' }, cor: '#FF1A1A' })),
+      ], { direcao: 'linha', intervalo: 6, quebra: 'sim' })]
+      : []),
+  ], {
+    intervalo: 8,
+    preenchimento: 12,
+    borda: { largura: 1, cor: '#3a322a' },
+    raio: 6,
+  })), { colunas: 2, intervalo: 12 }, { classe: 'fichas' }));
+  return partes;
+}
+
+/** Os verbetes do compêndio, um por caixa. */
+function osVerbetes(campanha) {
+  if (!campanha.entries.length) return [texto('Nenhum verbete neste compêndio.')];
+  return [pilha(campanha.entries.map(entrada => caixa([
+    caixa([
+      caixa([entrada.name], { peso: 'forte', corpo: 13, crescer: 1 }),
+      distintivo([entrada.kind + (entrada.level ? ' · nível ' + entrada.level : '')]),
+      ...(entrada.published ? [] : [distintivo(['NÃO PUBLICADO'],
+        { borda: { largura: 1, cor: '#f2521f' }, cor: '#f2521f' })]),
+    ], { direcao: 'linha', alinhar: 'centro', intervalo: 8, quebra: 'sim' }),
+    ...(entrada.description ? [caixa([entrada.description], { corpo: 12, entrelinha: 1.5 })] : []),
+  ], {
+    intervalo: 6,
+    preenchimento: 10,
+    borda: { largura: 1, cor: '#3a322a' },
+    raio: 6,
+  })), { intervalo: 10 })];
+}
+
+/** O que aconteceu, do mais recente para o mais antigo. */
+function oRegistro(campanha) {
+  if (!campanha.log.length) return [texto('Nada aconteceu nesta mesa ainda.')];
+  return [pilha(campanha.log.slice(-40).reverse().map(l => caixa([
+    caixa([nomeDe(l.person)], { corpo: 10, opacidade: 0.7 }),
+    caixa([l.text], { corpo: 12 }),
+  ], {
+    intervalo: 2,
+    preenchimento: 8,
+    borda: { largura: 1, cor: '#241f19' },
+    raio: 4,
+  })), { intervalo: 6 })];
+}
+
+/**
+ * A ordem de iniciativa, com o turno atual dito em palavra.
+ *
+ * `specs/06-clientes-gui.md` recusa informação que só a cor carregue, e é por
+ * isso que «na vez» é um distintivo com texto e não uma linha destacada.
+ */
+function aIniciativa(campanha) {
+  if (!campanha.initiative.length) {
+    return [
+      texto('Nenhuma ordem de iniciativa nesta mesa.'),
+      ...(ultimo.isGM ? [texto('Abra uma ficha e use ENTRAR NA INICIATIVA.')] : []),
+    ];
+  }
+  return [
+    caixa(['Rodada ' + campanha.round], { corpo: 12, opacidade: 0.75 }),
+    pilha(campanha.initiative.map((p, onde) => {
+      const naVez = p.id === campanha.currentTurn
+        || (ultimo.isGM && campanha.turn === onde);
+      return caixa([
+        caixa([String(p.value)], { corpo: 16, peso: 'forte', largura: 40 }),
+        caixa([p.name], { crescer: 1 }),
+        ...(naVez ? [distintivo(['NA VEZ'],
+          { borda: { largura: 1, cor: '#f2521f' }, cor: '#f2521f' })] : []),
+        ...(p.hidden ? [distintivo(['OCULTO'])] : []),
+      ], {
+        direcao: 'linha',
+        alinhar: 'centro',
+        intervalo: 10,
+        preenchimento: 8,
+        borda: { largura: 1, cor: naVez ? '#f2521f' : '#241f19' },
+        raio: 4,
+      });
+    }), { intervalo: 6 }),
+    ...(ultimo.isGM ? [acoes([
+      botao('iniciativa-proximo', 'PRÓXIMO TURNO', !campanha.initiative.length),
+      botao('iniciativa-limpar', 'LIMPAR INICIATIVA', !campanha.initiative.length),
+    ])] : []),
+  ];
+}
+
+/** As classes da página: o que muda quando ela aperta. */
+const CLASSES_DA_MESA = {
+  fichas: {
+    base: {},
+    consultas: [{ ateLargura: 640, estilo: { colunas: 1 } }],
+  },
+};
+
+/**
+ * O que continua na faixa.
+ *
+ * Uma linha: qual mesa, de quem é o turno, e a porta. Tudo o que era rolagem
+ * mudou de endereço.
+ */
+function aRegiao() {
+  if (!ultimo) return [texto('Consultando a campanha deste canal…')];
+  if (!temSuperficies) return desenhoDoEstado();
+  const campanha = ultimo.campaign;
+  if (!campanha) {
+    return [
+      caixa([
+        caixa([ultimo.canSetup
+          ? 'Nenhuma campanha neste canal.'
+          : 'Nenhuma campanha neste canal. Quem administra pode criar a mesa.'],
+        { opacidade: 0.8, crescer: 1 }),
+        ...(ultimo.canSetup
+          ? [botao('abrir-criar', 'CRIAR MESA', false, { variante: 'primaria' })]
+          : []),
+      ], { direcao: 'linha', alinhar: 'centro', intervalo: 8, quebra: 'sim' }),
+      ...(aviso ? [texto(aviso)] : []),
+    ];
+  }
+  const naVez = campanha.initiative[campanha.turn];
+  return [
+    caixa([
+      caixa([campanha.name], { peso: 'forte', crescer: 1 }),
+      ...(naVez ? [distintivo(['NA VEZ: ' + naVez.name],
+        { borda: { largura: 1, cor: '#f2521f' }, cor: '#f2521f' })] : []),
+      distintivo(['RODADA ' + campanha.round]),
+      botao('abrir-mesa', 'ABRIR A MESA', false, { variante: 'primaria' }),
+    ], { direcao: 'linha', alinhar: 'centro', intervalo: 8, quebra: 'sim' }),
+    ...(aviso ? [texto(aviso)] : []),
+  ];
+}
+
+// ------------------------------------------------------ abrir e repintar
+
+async function abrirMesa() {
+  if (!temSuperficies) return;
+  telas.mesa ??= await pagina('mesa', 'Mesa');
+  await telas.mesa.classes(CLASSES_DA_MESA);
+  await telas.mesa.titulo(ultimo?.campaign?.name || 'Mesa');
+  await telas.mesa.montar(aPaginaDaMesa());
+  await telas.mesa.mostrar();
+}
+
+async function abrirCriacao() {
+  if (!temSuperficies) return;
+  telas.criar ??= await dialogo('mesa-criar', 'Criar campanha', {
+    tamanho: { largura: 520 },
+    focoInicial: 'nova-campanha',
+    fecharComAlteracoes: 'confirmar',
+  });
+  await telas.criar.montar(oDialogoDeCriacao());
+  await telas.criar.suja(Boolean(rascunho.campanha));
+  await telas.criar.mostrar();
+}
+
+/** Redesenha o que estiver aberto, sem ir ao servidor. */
+async function repintarTelas() {
+  if (telas.mesa) {
+    await telas.mesa.titulo(ultimo?.campaign?.name || 'Mesa');
+    await telas.mesa.montar(aPaginaDaMesa());
+  }
+  if (telas.criar) {
+    await telas.criar.montar(oDialogoDeCriacao());
+    await telas.criar.suja(Boolean(rascunho.campanha));
+  }
 }
 
 function desenhoDoEstado() {
@@ -551,18 +936,73 @@ iniciar(
   async (snapshot, canal) => {
     const resposta = await request(canal, { op: 'view' });
     ultimo = { ...resposta, presentes: snapshot.presentes, canal };
-    return desenhoDoEstado();
+    // A entrada, uma vez por sessão. Registrá-la a cada consulta seria uma
+    // entrada nova a cada dois segundos.
+    if (temContribuicoes && !entradaRegistrada) {
+      try {
+        await entrada('Mesa', 'abrir-mesa');
+        entradaRegistrada = true;
+      } catch (erro) {
+        console.warn('MESA: a entrada foi recusada: ' + (erro.message || erro));
+      }
+    }
+    await repintarTelas();
+    return aRegiao();
   },
-  async () => { ultimo = null; arrastando = null; },
+  async () => {
+    ultimo = null;
+    arrastando = null;
+    telas.mesa = null;
+    telas.criar = null;
+    entradaRegistrada = false;
+  },
   (evento, canal, repintar) => {
     if (!ultimo) return null;
     const campanha = ultimo.campaign;
     const cena = campanha ? cenaAtiva(campanha) : null;
+
+    /**
+     * Redesenha os dois lugares onde esta mesa aparece.
+     *
+     * A faixa e a página mostram o **mesmo** estado local, e um só deles
+     * atualizado é a metade da tela dizendo uma coisa e a outra metade dizendo
+     * outra. Um ajudante só, e não dois caminhos: dois caminhos é como uma
+     * delas vai ficar para trás no dia em que alguém acrescentar um botão.
+     */
+    const redesenhar = () => {
+      repintar(aRegiao());
+      void repintarTelas();
+    };
+
+    // ---- o que o produto manda, e não a região ----
+    if (evento.nome === 'acao') {
+      if (evento.acao === 'abrir-mesa') {
+        return campanha ? abrirMesa() : abrirCriacao();
+      }
+      return null;
+    }
+    // O host pediu para fechar. Aceitar é a regra: ver `pedirFechamento`.
+    if (evento.nome === 'fechar' || evento.nome === 'fechar-pedido') return null;
+
+    if (evento.nome === 'aba') {
+      abaAberta = evento.valor;
+      return repintarTelas();
+    }
+
     // Sem campanha só há dois caminhos: preencher o formulário de criação e
     // apertar. Os outros pedem uma mesa.
     if (!campanha && !(evento.nome === 'campo' || evento.nome === 'escolha'
-      || evento.chave === 'criar-campanha')) {
+      || evento.chave === 'criar-campanha' || evento.chave === 'abrir-criar'
+      || evento.chave === 'cancelar-criar')) {
       return null;
+    }
+
+    if (evento.chave === 'abrir-mesa') return abrirMesa();
+    if (evento.chave === 'abrir-criar') return abrirCriacao();
+    if (evento.chave === 'cancelar-criar') {
+      // Cancelar **não** apaga o que foi escrito: o rascunho é da entidade, e
+      // reabrir o diálogo o encontra. É a mesma regra de U26 no PERFIS.
+      return telas.criar ? telas.criar.fechar('cancelado') : null;
     }
 
     // O sistema e o mestre escolhidos antes de existir campanha. Ficam no
@@ -571,7 +1011,7 @@ iniciar(
       if (evento.chave === 'novo-sistema') rascunho.sistema = evento.valor;
       else if (evento.chave === 'novo-gm') rascunho.gm = evento.valor;
       else return null;
-      repintar(desenhoDoEstado());
+      redesenhar();
       return null;
     }
 
@@ -591,7 +1031,7 @@ iniciar(
           const numerico = ['level', 'hp', 'maxHp', 'ac', 'speed'].includes(nome);
           fichaEmEdicao[nome] = numerico ? (Number(evento.valor) || 0) : evento.valor;
         }
-        repintar(desenhoDoEstado());
+        redesenhar();
         return null;
       }
       // Os três rascunhos com prefixo próprio: ação, verbete e cena.
@@ -599,14 +1039,14 @@ iniciar(
         acaoEmEdicao = { ...(acaoEmEdicao ?? {}) };
         const nome = evento.chave.slice(3);
         acaoEmEdicao[nome] = nome === 'max' ? (Number(evento.valor) || 0) : evento.valor;
-        repintar(desenhoDoEstado());
+        redesenhar();
         return null;
       }
       if (evento.chave.startsWith('v-')) {
         verbeteEmEdicao = { ...(verbeteEmEdicao ?? {}) };
         const nome = evento.chave.slice(2);
         verbeteEmEdicao[nome] = nome === 'level' ? (Number(evento.valor) || 0) : evento.valor;
-        repintar(desenhoDoEstado());
+        redesenhar();
         return null;
       }
       if (evento.chave.startsWith('c-') && cena) {
@@ -614,7 +1054,7 @@ iniciar(
         const nome = evento.chave.slice(2);
         const numerico = nome === 'cols' || nome === 'rows';
         cenaEmEdicao[nome] = numerico ? (Number(evento.valor) || 0) : evento.valor;
-        repintar(desenhoDoEstado());
+        redesenhar();
         return null;
       }
       if (evento.chave.startsWith('s-') && ficha) {
@@ -623,7 +1063,7 @@ iniciar(
         const nivel = Number(evento.chave.slice(2));
         fichaEmEdicao.slots = (fichaEmEdicao.slots ?? []).map((s, i) =>
           i === nivel ? { ...s, max: Number(evento.valor) || 0 } : s);
-        repintar(desenhoDoEstado());
+        redesenhar();
         return null;
       }
       const onde = {
@@ -633,7 +1073,7 @@ iniciar(
       }[evento.chave];
       if (!onde) return null;
       rascunho[onde] = evento.valor;
-      repintar(desenhoDoEstado());
+      redesenhar();
       return null;
     }
 
@@ -646,8 +1086,8 @@ iniciar(
         // sobre uma peça é exatamente o que quem pinta uma parede quer.
         if (evento.fase !== 'comecou') return null;
         return escrever(canal, { op: 'wall', scene: cena.id, x, y }).then(
-          () => repintar(desenhoDoEstado()),
-          erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+          () => redesenhar(),
+          erro => { aviso = erro.message || String(erro); redesenhar(); },
         );
       }
       if (evento.fase === 'comecou') {
@@ -670,7 +1110,7 @@ iniciar(
         // fácil de saturar a fila.
         if (arrastando.x !== x || arrastando.y !== y) {
           arrastando = { ...arrastando, x, y };
-          repintar(desenhoDoEstado());
+          redesenhar();
         }
         return null;
       }
@@ -681,10 +1121,10 @@ iniciar(
       arrastando = null;
       aviso = '';
       return escrever(canal, { op: 'token-move', scene: cena.id, id: solto.id, x, y }).then(
-        () => repintar(desenhoDoEstado()),
+        () => redesenhar(),
         erro => {
           aviso = 'a peça não se move: ' + (erro.message || String(erro));
-          repintar(desenhoDoEstado());
+          redesenhar();
         },
       );
     }
@@ -692,27 +1132,27 @@ iniciar(
     if (evento.nome === 'escolha' && evento.chave.startsWith('ac-')) {
       acaoEmEdicao = { ...(acaoEmEdicao ?? {}) };
       acaoEmEdicao[evento.chave.slice(3)] = evento.valor;
-      repintar(desenhoDoEstado());
+      redesenhar();
       return null;
     }
     if (evento.nome === 'escolha' && evento.chave === 'trilha-mesa') {
       return escrever(canal, { op: 'music', command: 'select', preset: evento.valor }).then(
-        () => repintar(desenhoDoEstado()),
-        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        () => redesenhar(),
+        erro => { aviso = erro.message || String(erro); redesenhar(); },
       );
     }
     if (evento.nome === 'escolha' && evento.chave === 'trilha' && cena) {
       return escrever(canal, { op: 'scene-music', id: cena.id, preset: evento.valor }).then(
-        () => repintar(desenhoDoEstado()),
-        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        () => redesenhar(),
+        erro => { aviso = erro.message || String(erro); redesenhar(); },
       );
     }
     if (evento.nome === 'escolha' && evento.chave === 'cena') {
       aviso = 'trocando a cena…';
-      repintar(desenhoDoEstado());
+      redesenhar();
       return escrever(canal, { op: 'scene-show', id: evento.valor }).then(
-        () => { aviso = ''; repintar(desenhoDoEstado()); },
-        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        () => { aviso = ''; redesenhar(); },
+        erro => { aviso = erro.message || String(erro); redesenhar(); },
       );
     }
 
@@ -720,7 +1160,7 @@ iniciar(
       // Cancelar é uma resposta: `null` quer dizer que o seletor foi fechado.
       if (!evento.arquivo) {
         aviso = evento.porque ?? 'nenhum arquivo escolhido';
-        repintar(desenhoDoEstado());
+        redesenhar();
         return null;
       }
       if (canal === null) return null;
@@ -728,13 +1168,13 @@ iniciar(
       if (paraRetrato && !fichaAberta) return null;
       if (!paraRetrato && !cena) return null;
       aviso = paraRetrato ? 'enviando o retrato…' : 'enviando o mapa…';
-      repintar(desenhoDoEstado());
+      redesenhar();
       const enviando = paraRetrato
         ? enviarImagem(canal, evento.arquivo, (extra) => ({ op: 'portrait-part', sheet: fichaAberta, ...extra }))
         : enviarImagem(canal, evento.arquivo, (extra) => ({ op: 'image-part', scene: cena.id, ...extra }));
       return enviando.then(
-        () => { aviso = paraRetrato ? 'retrato enviado' : 'mapa enviado'; repintar(desenhoDoEstado()); },
-        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        () => { aviso = paraRetrato ? 'retrato enviado' : 'mapa enviado'; redesenhar(); },
+        erro => { aviso = erro.message || String(erro); redesenhar(); },
       );
     }
 
@@ -755,7 +1195,7 @@ iniciar(
         fichaEmEdicao.spells = tinha
           ? fichaEmEdicao.spells.filter(s => s !== magia)
           : [...(fichaEmEdicao.spells ?? []), magia];
-        repintar(desenhoDoEstado());
+        redesenhar();
         return null;
       }
       const conjurar = daFicha('conjurar-');
@@ -764,28 +1204,28 @@ iniciar(
         return escrever(canal, {
           op: 'cast', sheet: ficha.id, entry: conjurar, level: entrada?.level ?? 0,
         }).then(
-          () => repintar(desenhoDoEstado()),
-          erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+          () => redesenhar(),
+          erro => { aviso = erro.message || String(erro); redesenhar(); },
         );
       }
       const usar = daFicha('usar-acao-');
       if (usar) {
         return escrever(canal, { op: 'action-use', sheet: ficha.id, id: usar }).then(
-          () => repintar(desenhoDoEstado()),
-          erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+          () => redesenhar(),
+          erro => { aviso = erro.message || String(erro); redesenhar(); },
         );
       }
       const editar = daFicha('editar-acao-');
       if (editar) {
         acaoEmEdicao = { ...(ficha.actions ?? []).find(a => a.id === editar) };
-        repintar(desenhoDoEstado());
+        redesenhar();
         return null;
       }
       const tirar = daFicha('tirar-acao-');
       if (tirar) {
         return escrever(canal, { op: 'action-remove', sheet: ficha.id, id: tirar }).then(
-          () => repintar(desenhoDoEstado()),
-          erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+          () => redesenhar(),
+          erro => { aviso = erro.message || String(erro); redesenhar(); },
         );
       }
       if (evento.chave === 'gravar-acao' && acaoEmEdicao?.name) {
@@ -796,21 +1236,21 @@ iniciar(
           description: a.description ?? '', max: a.max ?? 0, used: a.used ?? 0,
           recharge: a.recharge ?? 'manual',
         }).then(
-          () => { acaoEmEdicao = null; repintar(desenhoDoEstado()); },
-          erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+          () => { acaoEmEdicao = null; redesenhar(); },
+          erro => { aviso = erro.message || String(erro); redesenhar(); },
         );
       }
       if (evento.chave === 'descansar') {
         return escrever(canal, { op: 'rest', sheet: ficha.id }).then(
-          () => repintar(desenhoDoEstado()),
-          erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+          () => redesenhar(),
+          erro => { aviso = erro.message || String(erro); redesenhar(); },
         );
       }
     }
     if (campanha && evento.chave.startsWith('editar-verbete-')) {
       const id = evento.chave.slice('editar-verbete-'.length);
       verbeteEmEdicao = { ...campanha.entries.find(e => e.id === id) };
-      repintar(desenhoDoEstado());
+      redesenhar();
       return null;
     }
     if (campanha && evento.chave.startsWith('publicar-verbete-')) {
@@ -822,8 +1262,8 @@ iniciar(
         description: entrada.description, formula: entrada.formula,
         published: !entrada.published,
       }).then(
-        () => repintar(desenhoDoEstado()),
-        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        () => redesenhar(),
+        erro => { aviso = erro.message || String(erro); redesenhar(); },
       );
     }
     if (evento.chave === 'gravar-verbete' && verbeteEmEdicao?.name) {
@@ -834,13 +1274,13 @@ iniciar(
         description: v.description ?? '', formula: v.formula ?? '',
         published: v.published === true,
       }).then(
-        () => { verbeteEmEdicao = null; repintar(desenhoDoEstado()); },
-        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        () => { verbeteEmEdicao = null; redesenhar(); },
+        erro => { aviso = erro.message || String(erro); redesenhar(); },
       );
     }
     if (evento.chave === 'descartar-cena') {
       cenaEmEdicao = null;
-      repintar(desenhoDoEstado());
+      redesenhar();
       return null;
     }
     if (evento.chave === 'gravar-cena' && cenaEmEdicao && cena) {
@@ -849,36 +1289,36 @@ iniciar(
         op: 'scene-save', id: cena.id, name: c.name, description: c.description ?? '',
         notes: c.notes ?? '', cols: c.cols, rows: c.rows, cellMeters: cena.cellMeters,
       }).then(
-        () => { cenaEmEdicao = null; repintar(desenhoDoEstado()); },
-        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        () => { cenaEmEdicao = null; redesenhar(); },
+        erro => { aviso = erro.message || String(erro); redesenhar(); },
       );
     }
     if (campanha && evento.chave.startsWith('abrir-ficha-')) {
       fichaAberta = evento.chave.slice('abrir-ficha-'.length);
-      repintar(desenhoDoEstado());
+      redesenhar();
       return null;
     }
     if (evento.chave === 'fechar-ficha') {
       fichaAberta = null;
       fichaEmEdicao = null;
-      repintar(desenhoDoEstado());
+      redesenhar();
       return null;
     }
     if (evento.chave === 'descartar-ficha') {
       fichaEmEdicao = null;
-      repintar(desenhoDoEstado());
+      redesenhar();
       return null;
     }
     if (evento.chave === 'modo-parede') {
       modoParede = !modoParede;
-      repintar(desenhoDoEstado());
+      redesenhar();
       return null;
     }
     if (evento.chave === 'gravar-ficha' && fichaEmEdicao) {
       const enviada = fichaEmEdicao;
       return escrever(canal, { op: 'sheet-save', sheet: enviada }).then(
-        () => { fichaEmEdicao = null; aviso = 'ficha gravada'; repintar(desenhoDoEstado()); },
-        erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+        () => { fichaEmEdicao = null; aviso = 'ficha gravada'; redesenhar(); },
+        erro => { aviso = erro.message || String(erro); redesenhar(); },
       );
     }
     const quanto = Number(rascunho.dano) || 0;
@@ -922,9 +1362,9 @@ iniciar(
         if (evento.chave.startsWith('criar-')) {
           rascunho[evento.chave.slice('criar-'.length)] = '';
         }
-        repintar(desenhoDoEstado());
+        redesenhar();
       },
-      erro => { aviso = erro.message || String(erro); repintar(desenhoDoEstado()); },
+      erro => { aviso = erro.message || String(erro); redesenhar(); },
     );
   },
 );
