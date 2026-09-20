@@ -7,3 +7,4 @@ publish = false
 # Development-only check against the same JS engine used by SEELE.
 [dependencies]
 rquickjs = "=0.12.2"
+serde_json = "1"
