@@ -785,13 +785,19 @@ async function abrirCriacao() {
 
 /** Redesenha o que estiver aberto, sem ir ao servidor. */
 async function repintarTelas() {
-  if (telas.mesa) {
-    await telas.mesa.titulo(ultimo?.campaign?.name || 'Mesa');
-    await telas.mesa.montar(aPaginaDaMesa());
+  // **Os punhos lidos uma vez.** Entre um `await` e o seguinte, outra volta
+  // pode descartar a tela — é o que a criação da campanha faz com o diálogo —,
+  // e `telas.criar.suja` passava a ler de `null`. Lido antes, o descarte
+  // encontra um punho já descartado, que recusa em vez de estourar.
+  const mesa = telas.mesa;
+  if (mesa) {
+    await mesa.titulo(ultimo?.campaign?.name || 'Mesa');
+    await mesa.montar(aPaginaDaMesa());
   }
-  if (telas.criar) {
-    await telas.criar.montar(oDialogoDeCriacao());
-    await telas.criar.suja(Boolean(rascunho.campanha));
+  const criar = telas.criar;
+  if (criar) {
+    await criar.montar(oDialogoDeCriacao());
+    await criar.suja(Boolean(rascunho.campanha));
   }
 }
 
@@ -1419,11 +1425,39 @@ iniciar(
     if (!pedido) return null;
     aviso = '';
     return escrever(canal, pedido).then(
-      () => {
+      async () => {
         // O que foi criado saiu do rascunho: deixá-lo cheio faria o botão
         // continuar ligado e a próxima criação repetir o nome.
         if (evento.chave.startsWith('criar-')) {
           rascunho[evento.chave.slice('criar-'.length)] = '';
+        }
+        // **A criação da campanha fecha o diálogo e abre a mesa.**
+        //
+        // N5 da validação nativa de 20/09/2026: «criar campanha deixa o
+        // diálogo aberto e vazio, apesar do sucesso». Limpar o rascunho e
+        // redesenhar deixava na tela um formulário com o nome apagado e o
+        // botão desligado — que é a aparência exata de uma criação que **não**
+        // aconteceu. Era preciso fechá-lo à mão para ver a campanha.
+        //
+        // Fechar só depois de o servidor confirmar, e só na criação da
+        // campanha: as outras — cena, ficha, peça — acontecem dentro de uma
+        // tela que continua sendo usada para a seguinte.
+        if (evento.chave === 'criar-campanha') {
+          await redesenhar();
+          try {
+            if (telas.criar) {
+              // Descartada, e não só fechada: a próxima criação começa de uma
+              // janela nova, sem o que ficou escrito na anterior.
+              const criada = telas.criar;
+              telas.criar = null;
+              await criada.descartar();
+            }
+            await abrirMesa();
+            await avisar('Campanha criada.');
+          } catch (falha) {
+            aviso = falha.message || String(falha);
+          }
+          return;
         }
         redesenhar();
       },
