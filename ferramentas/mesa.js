@@ -22,7 +22,7 @@ const {
   caixa, pilha, grade, separador, espaco,
   acoes, abas, aba, formulario, textoLongo, numero, distintivo,
   request, iniciar, temSuperficies, temContribuicoes,
-  pagina, dialogo, contribuir, entrada, avisar,
+  pagina, dialogo, contribuir, entrada, avisar, agruparAtualizacoes,
 } = interfaceMod('seele/mesa', 'MESA', 2000);
 
 /** A aba aberta na página da mesa. */
@@ -39,6 +39,8 @@ const LADO_MAXIMO = 1024;
 
 let ultimo = null;
 let aviso = '';
+let rolagemPendente = null;
+let ultimaRolagem = null;
 let formula = '1d20';
 /** O que está sendo escrito nos campos de criação e edição. */
 const rascunho = { campanha: '', cena: '', ficha: '', peca: '', dano: '', entrada: '',
@@ -191,6 +193,14 @@ function tabuleiro(cena) {
   };
 }
 
+function estadoVazio(titulo, orientacao) {
+  return caixa([cabecalho(titulo), texto(orientacao)], {
+    direcao: 'coluna', intervalo: 12, preenchimento: 24,
+    borda: { largura: 1, estilo: 'tracejada', cor: '#3a322a' },
+    largura: 'total', entrelinha: 1.5,
+  });
+}
+
 function oTabuleiro(campanha) {
   const cena = cenaAtiva(campanha);
   // **Uma mesa vazia é um convite, e não um aviso.** A frase anterior —
@@ -198,22 +208,11 @@ function oTabuleiro(campanha) {
   // a quem abriu isto pela primeira vez. Quem mestra recebe o próximo passo;
   // quem joga recebe o motivo de a mesa estar vazia.
   if (!cena) {
-    return [caixa([
-      caixa([ultimo.isGM
-        ? 'A mesa está vazia. Crie uma cena abaixo e ela aparece aqui para '
-          + 'todo mundo — um mapa com peças, ou uma ilustração.'
-        : 'A mesa está vazia. Quem mestra põe a cena, e ela aparece aqui.'],
-      { entrelinha: 1.5, larguraMaxima: 440, cor: '#908574' }),
-    ], {
-      preenchimento: 28,
-      alinhamento: 'centro',
-      alinhar: 'centro',
-      distribuir: 'centro',
-      direcao: 'linha',
-      borda: { largura: 1, estilo: 'tracejada', cor: '#3a322a' },
-      largura: 'total',
-    })];
+    return [estadoVazio('A mesa está vazia', ultimo.isGM
+      ? 'Crie uma cena abaixo para começar: um mapa com peças ou uma ilustração.'
+      : 'Quem mestra prepara a cena. Enquanto isso, você já pode rolar dados abaixo.')];
   }
+
   const partes = [cabecalho(cena.name)];
   if (cena.kind === 'map') {
     // A imagem da cena vem da metade de servidor deste MOD e entra **dentro**
@@ -232,49 +231,57 @@ function oTabuleiro(campanha) {
   return partes;
 }
 
-function osControles(campanha) {
-  const partes = [
+function osControles(campanha, secao = 'tudo') {
+  const mostrar = nome => secao === 'tudo' || secao === nome;
+  const partes = mostrar('tabuleiro') ? [
     // A rolagem não precisa da largura da mesa: um campo de `1d20` com mil
     // pixels é um campo que parece esperar outra coisa.
-    caixa([linha([campo('formula', 'DADOS', formula), botao('rolar', 'ROLAR')])],
-      { larguraMaxima: 420 }),
-  ];
+    caixa([
+      linha([campo('formula', 'DADOS', formula),
+        botao('rolar', rolagemPendente === ultimo.canal ? 'ROLANDO…' : 'ROLAR', rolagemPendente === ultimo.canal)]),
+      ...(ultimaRolagem?.canal === ultimo.canal ? [caixa([ultimaRolagem.texto], {
+        corpo: 14, entrelinha: 1.5, cor: ultimaRolagem.erro ? '#ff7970' : '#eae3cf',
+      })] : []),
+    ], { larguraMaxima: 420, direcao: 'coluna', intervalo: 12 }),
+  ] : [];
   const cena = cenaAtiva(campanha);
   if (ultimo.isGM) {
-    const cenas = campanha.scenes.map(c => ({ valor: String(c.id), dentro: c.name }));
-    if (cenas.length) {
-      partes.push(escolha('cena', 'CENA EM CIMA DA MESA', String(campanha.active ?? ''), cenas));
-    }
-    partes.push(linha([
-      campo('nova-cena', 'CENA NOVA', rascunho.cena),
-      botao('criar-cena', 'CRIAR CENA', !rascunho.cena),
-    ]));
-    if (cena) {
+    if (mostrar('tabuleiro')) {
+      const cenas = campanha.scenes.map(c => ({ valor: String(c.id), dentro: c.name }));
+      if (cenas.length) {
+        partes.push(escolha('cena', 'CENA EM CIMA DA MESA', String(campanha.active ?? ''), cenas));
+      }
       partes.push(linha([
-        { forma: 'arquivo', chave: 'mapa', dentro: 'ENVIAR MAPA' },
-        campo('nova-peca', 'PEÇA NOVA', rascunho.peca),
-        botao('criar-peca', 'PÔR PEÇA', !rascunho.peca || cena.kind !== 'map'),
+        campo('nova-cena', 'CENA NOVA', rascunho.cena),
+        botao('criar-cena', 'CRIAR CENA', !rascunho.cena),
       ]));
-      // **Dois modos na mesma tela.** Arrastar move peça; pintar troca parede.
-      // Um modo é mais honesto que adivinhar pela figura sob o dedo: quem pinta
-      // uma parede quer pintar mesmo onde há peça.
-      partes.push(linha([
-        botao('modo-parede', modoParede ? 'PARAR DE PINTAR PAREDE' : 'PINTAR PAREDE'),
-        escolha('trilha', 'TRILHA DA CENA', cena.ambience ?? 'inherit', [
-          { valor: 'inherit', dentro: 'A DA MESA' }, ...TRILHAS,
-        ]),
-      ]));
+      if (cena) {
+        partes.push(linha([
+          { forma: 'arquivo', chave: 'mapa', dentro: 'ENVIAR MAPA' },
+          campo('nova-peca', 'PEÇA NOVA', rascunho.peca),
+          botao('criar-peca', 'PÔR PEÇA', !rascunho.peca || cena.kind !== 'map'),
+        ]));
+        // **Dois modos na mesma tela.** Arrastar move peça; pintar troca parede.
+        // Um modo é mais honesto que adivinhar pela figura sob o dedo: quem pinta
+        // uma parede quer pintar mesmo onde há peça.
+        partes.push(linha([
+          botao('modo-parede', modoParede ? 'PARAR DE PINTAR PAREDE' : 'PINTAR PAREDE'),
+          escolha('trilha', 'TRILHA DA CENA', cena.ambience ?? 'inherit', [
+            { valor: 'inherit', dentro: 'A DA MESA' }, ...TRILHAS,
+          ]),
+        ]));
+      }
+      partes.push(escolha('trilha-mesa', 'TRILHA DA MESA', campanha.music?.preset ?? 'silence', TRILHAS));
     }
-    partes.push(escolha('trilha-mesa', 'TRILHA DA MESA', campanha.music?.preset ?? 'silence', TRILHAS));
-    partes.push(linha([
+    if (mostrar('compendio')) partes.push(linha([
       campo('nova-entrada', 'VERBETE NOVO', rascunho.entrada),
       botao('criar-entrada', 'CRIAR VERBETE', !rascunho.entrada),
     ]));
-    partes.push(linha([
+    if (mostrar('fichas')) partes.push(linha([
       campo('nova-ficha', 'FICHA NOVA', rascunho.ficha),
       botao('criar-ficha', 'CRIAR FICHA', !rascunho.ficha),
     ]));
-    partes.push(linha([
+    if (secao === 'tudo') partes.push(linha([
       botao('iniciativa-proximo', 'PRÓXIMO TURNO', !campanha.initiative.length),
       botao('iniciativa-limpar', 'LIMPAR INICIATIVA', !campanha.initiative.length),
     ]));
@@ -526,8 +533,8 @@ function aPaginaDaMesa() {
     caixa([
       distintivo([ultimo.isGM ? 'MESTRE' : 'JOGADOR'],
         { borda: { largura: 1, cor: '#f2521f' }, cor: '#f2521f', corpo: 10 }),
-      caixa(['sistema ' + campanha.system + ' · GM ' + nomeDe(campanha.gm)
-        + ' · revisão ' + campanha.revision], { corpo: 11, opacidade: 0.7, crescer: 1 }),
+      caixa(['Sistema ' + (SISTEMAS.find(s => s.valor === campanha.system)?.dentro ?? campanha.system)
+        + ' · Mestre ' + nomeDe(campanha.gm)], { corpo: 11, opacidade: 0.7, crescer: 1 }),
     ], { direcao: 'linha', alinhar: 'centro', intervalo: 10, quebra: 'sim' }),
 
     ...aTrilhaQueToca(campanha, cena),
@@ -535,14 +542,16 @@ function aPaginaDaMesa() {
     abas('aba', abaAberta, [
       aba('tabuleiro', 'TABULEIRO', [
         ...oTabuleiro(campanha),
-        ...osControles(campanha),
+        ...osControles(campanha, 'tabuleiro'),
         ...aCenaEmAjuste(campanha),
       ]),
       aba('fichas', 'FICHAS', [
+        ...osControles(campanha, 'fichas'),
         ...aFichaAberta(campanha),
         ...asFichas(campanha),
       ]),
       aba('compendio', 'COMPÊNDIO', [
+        ...osControles(campanha, 'compendio'),
         ...oCompendio(campanha),
         ...osVerbetes(campanha),
       ]),
@@ -640,7 +649,9 @@ function asFichas(campanha) {
     cabecalho(ultimo.isGM ? 'Fichas da campanha' : 'Suas fichas'),
   ];
   if (!campanha.sheets.length) {
-    partes.push(texto('Nenhuma ficha nesta mesa ainda.'));
+    partes.push(estadoVazio('Nenhuma ficha disponível', ultimo.isGM
+      ? 'Crie uma ficha acima para começar a campanha.'
+      : 'Você ainda não tem uma ficha disponível. Peça a quem mestra para atribuir uma a você.'));
     return partes;
   }
   partes.push(grade(campanha.sheets.map(ficha => caixa([
@@ -666,14 +677,14 @@ function asFichas(campanha) {
     intervalo: 8,
     preenchimento: 12,
     borda: { largura: 1, cor: '#3a322a' },
-    raio: 6,
+    raio: 0,
   })), { colunas: 2, intervalo: 12 }, { classe: 'fichas' }));
   return partes;
 }
 
 /** Os verbetes do compêndio, um por caixa. */
 function osVerbetes(campanha) {
-  if (!campanha.entries.length) return [texto('Nenhum verbete neste compêndio.')];
+  if (!campanha.entries.length) return [estadoVazio('Compêndio vazio', ultimo.isGM ? 'Adicione um verbete acima para organizar o mundo da campanha.' : 'Os verbetes publicados por quem mestra aparecerão aqui.')];
   return [pilha(campanha.entries.map(entrada => caixa([
     caixa([
       caixa([entrada.name], { peso: 'forte', corpo: 13, crescer: 1 }),
@@ -686,13 +697,13 @@ function osVerbetes(campanha) {
     intervalo: 6,
     preenchimento: 10,
     borda: { largura: 1, cor: '#3a322a' },
-    raio: 6,
+    raio: 0,
   })), { intervalo: 10 })];
 }
 
 /** O que aconteceu, do mais recente para o mais antigo. */
 function oRegistro(campanha) {
-  if (!campanha.log.length) return [texto('Nada aconteceu nesta mesa ainda.')];
+  if (!campanha.log.length) return [estadoVazio('O registro está vazio', 'Role um dado no Tabuleiro. Os resultados e acontecimentos da campanha ficam aqui.')];
   return [pilha(campanha.log.slice(-40).reverse().map(l => caixa([
     caixa([nomeDe(l.person)], { corpo: 10, opacidade: 0.7 }),
     caixa([l.text], { corpo: 12 }),
@@ -700,7 +711,7 @@ function oRegistro(campanha) {
     intervalo: 2,
     preenchimento: 8,
     borda: { largura: 1, cor: '#241f19' },
-    raio: 4,
+    raio: 0,
   })), { intervalo: 6 })];
 }
 
@@ -713,8 +724,9 @@ function oRegistro(campanha) {
 function aIniciativa(campanha) {
   if (!campanha.initiative.length) {
     return [
-      texto('Nenhuma ordem de iniciativa nesta mesa.'),
-      ...(ultimo.isGM ? [texto('Abra uma ficha e use ENTRAR NA INICIATIVA.')] : []),
+      estadoVazio('A iniciativa ainda não começou', ultimo.isGM
+        ? 'Abra uma ficha e use ENTRAR NA INICIATIVA.'
+        : 'Quem mestra define a ordem dos turnos. Ela aparecerá aqui.'),
     ];
   }
   return [
@@ -734,7 +746,7 @@ function aIniciativa(campanha) {
         intervalo: 10,
         preenchimento: 8,
         borda: { largura: 1, cor: naVez ? '#f2521f' : '#241f19' },
-        raio: 4,
+        raio: 0,
       });
     }), { intervalo: 6 }),
     ...(ultimo.isGM ? [acoes([
@@ -813,7 +825,7 @@ async function abrirCriacao() {
 }
 
 /** Redesenha o que estiver aberto, sem ir ao servidor. */
-async function repintarTelas() {
+const repintarTelas = agruparAtualizacoes(async () => {
   // **Os punhos lidos uma vez.** Entre um `await` e o seguinte, outra volta
   // pode descartar a tela — é o que a criação da campanha faz com o diálogo —,
   // e `telas.criar.suja` passava a ler de `null`. Lido antes, o descarte
@@ -828,7 +840,7 @@ async function repintarTelas() {
     await criar.montar(oDialogoDeCriacao());
     await criar.suja(Boolean(rascunho.campanha));
   }
-}
+});
 
 function desenhoDoEstado() {
   if (!ultimo) return [texto('Consultando a campanha deste canal…')];
@@ -1069,7 +1081,10 @@ iniciar(
      */
     const redesenhar = () => {
       repintar(aRegiao());
-      void repintarTelas();
+      return repintarTelas().catch(erro => {
+        aviso = erro.message || String(erro);
+        return avisar('Não foi possível atualizar a mesa: ' + aviso, 'erro');
+      });
     };
 
     // ---- o que o produto manda, e não a região ----
@@ -1453,8 +1468,16 @@ iniciar(
                           : null;
     if (!pedido) return null;
     aviso = '';
-    return escrever(canal, pedido).then(
-      async () => {
+    const rolagem = evento.chave === 'rolar';
+    if (rolagem && rolagemPendente !== null) return null;
+    if (rolagem) rolagemPendente = canal;
+    const preparar = rolagem ? redesenhar() : Promise.resolve();
+    return preparar.then(() => escrever(canal, pedido)).then(
+      async resposta => {
+        if (rolagem) {
+          rolagemPendente = null;
+          ultimaRolagem = { canal, texto: resposta.campaign?.log?.at(-1)?.text || 'Rolagem concluída. Veja o registro.' };
+        }
         // O que foi criado saiu do rascunho: deixá-lo cheio faria o botão
         // continuar ligado e a próxima criação repetir o nome.
         if (evento.chave.startsWith('criar-')) {
@@ -1490,7 +1513,11 @@ iniciar(
         }
         redesenhar();
       },
-      erro => { aviso = erro.message || String(erro); redesenhar(); },
+      erro => {
+        aviso = erro.message || String(erro);
+        if (rolagem) { rolagemPendente = null; ultimaRolagem = { canal, erro: true, texto: 'Não foi possível rolar: ' + aviso }; }
+        return redesenhar();
+      },
     );
   },
 );

@@ -369,7 +369,7 @@ const PROPRIEDADES_DE_ESTILO = new Set([
   'direcao', 'alinhar', 'distribuir', 'quebra', 'crescer', 'encolher', 'base',
   'intervalo', 'preenchimento', 'margem',
   'largura', 'altura', 'larguraMinima', 'larguraMaxima', 'alturaMinima', 'alturaMaxima',
-  'colunas', 'posicao', 'recortar', 'proporcao',
+  'colunas', 'posicao', 'recortar', 'proporcao', 'linhasMaximas',
   'girar', 'escalar', 'mover', 'transicao', 'animacao',
 ]);
 
@@ -1154,7 +1154,7 @@ if (manifest.id === 'seele/mesa') {
     const rolagem = c.requests.find(r => r.body.op === 'roll');
     assert.ok(rolagem, 'ROLAR não foi ao servidor');
     assert.equal(rolagem.body.formula, '2d6+3');
-    assert.match(oQueAMesaDiz(c), /Dados/);
+    assert.match(oQueAMesaDiz(c), /Dados · 2d6\+3 =/, 'o resultado não apareceu no Tabuleiro');
   });
   test('MESA: um toque no vazio do tabuleiro não move peça nenhuma', async () => {
     const w = world();
