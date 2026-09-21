@@ -583,7 +583,7 @@ function osControles(campanha, secao = 'tudo') {
       ]));
       if (cena) {
         partes.push(linha([
-          { forma: 'arquivo', chave: 'mapa', dentro: 'ENVIAR MAPA' },
+          { forma: 'arquivo', chave: 'mapa', dentro: 'ENVIAR MAPA', tipos: ['imagem'], limiteDeBytes: 10 * 1024 * 1024 },
           campo('nova-peca', 'PEÇA NOVA', rascunho.peca),
           botao('criar-peca', 'PÔR PEÇA', !rascunho.peca || cena.kind !== 'map'),
         ]));
@@ -647,7 +647,7 @@ function aFichaAberta(campanha) {
       descricao: 'Retrato de ' + ficha.name,
     });
   }
-  partes.push({ forma: 'arquivo', chave: 'retrato', dentro: 'ENVIAR RETRATO' });
+  partes.push({ forma: 'arquivo', chave: 'retrato', dentro: 'ENVIAR RETRATO', tipos: ['imagem'], limiteDeBytes: 10 * 1024 * 1024 });
 
   // **A ficha inteira, e não só a vida.** Editar só os pontos de vida seria
   // outra forma de tela de leitura: o que se muda numa mesa é a ficha.
@@ -1131,7 +1131,7 @@ function aRegiao() {
 
 async function abrirMesa() {
   if (!temSuperficies) return;
-  telas.mesa ??= await pagina('mesa', 'Mesa');
+  telas.mesa ??= await pagina('mesa', 'Mesa', { imersiva: true });
   await telas.mesa.classes(CLASSES_DA_MESA);
   await telas.mesa.titulo(ultimo?.campaign?.name || 'Mesa');
   await telas.mesa.montar(aPaginaDaMesa());

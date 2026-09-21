@@ -646,8 +646,9 @@ if (manifest.id === 'seele/mesa') {
 
     const guardada = w.call({ op: 'view' }, '1').campaign.scenes.find(s => s.id === id);
     assert.ok(guardada.asset, 'o mapa não foi publicado: ' + oQueAMesaDiz(c));
-    const lido = w.call({ op: 'asset', scene: id }, '1');
-    const base64 = lido.image.slice(lido.image.indexOf(',') + 1);
+    let lido = w.call({ op: 'asset', scene: id }, '1'), image = lido.image;
+    while (lido.proximo) { lido = w.call({ op: 'asset', scene: id, ...lido.proximo }, '1'); image += lido.image; }
+    const base64 = image.slice(image.indexOf(',') + 1);
     assert.deepEqual(Buffer.from(base64, 'base64'), png, 'o mapa chegou diferente do que saiu');
     assert.deepEqual(c.soltos, [arquivo], 'o arquivo escolhido não foi devolvido');
   });

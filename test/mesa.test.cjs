@@ -165,14 +165,13 @@ test('portraits are private until GM publication, independent of sheet fields',(
   s.request(2,'portrait-clear',{sheet:char.id});assert.equal(s.request(2,'portrait-asset',{sheet:char.id}).error,'not-found');
 });
 
-test('portrait chunks persist across runtimes, reject invalid order and enforce 64 KiB',()=>{
+test('portrait chunks persist across runtimes and reject invalid order',()=>{
   const s=session();s.setup();let r=s.request(1,'sheet-create',{name:'Iria',owner:'2'});const sheet=r.campaign.sheets[0].id;
   assert.equal(s.request(2,'portrait-part',{sheet,index:1,total:2,part:'YQ=='}).error,'upload-order');
   s.request(2,'portrait-part',{sheet,index:0,total:2,part:'data:image/png;base64,'});
   r=s.request(2,'portrait-part',{sheet,index:1,total:2,part:'YQ=='});assert.equal(r.ok,true);assert.equal(r.campaign.sheets[0].portrait.upload,undefined);
   assert.equal(s.request(2,'portrait-asset',{sheet}).image,'data:image/png;base64,YQ==');
-  for(let index=0;index<9;index++)assert.equal(s.request(2,'portrait-part',{sheet,index,total:10,part:'a'.repeat(7000)}).ok,true);
-  assert.equal(s.request(2,'portrait-part',{sheet,index:9,total:10,part:'a'.repeat(7000)}).error,'image-too-large');
+  assert.equal(s.request(2,'portrait-part',{sheet,index:0,total:2500,part:'data:image/png;base64,'}).error,'invalid-number');
   assert.equal(s.request(2,'portrait-asset',{sheet}).image,'data:image/png;base64,YQ==');
 });
 
@@ -231,4 +230,27 @@ test('scene ambience stays private until reveal; inherit keeps current music and
   s.request(1,'scene-music',{id,preset:'inherit'});s.advance(4);
   r=s.request(1,'scene-show',{id});assert.equal(r.campaign.music.startedAt,123);
   r=s.request(1,'scene-hide',{id});assert.equal(r.campaign.music.playing,false);
+});
+
+for (const portrait of [false, true]) test(`image upload: ${portrait ? 'portrait' : 'map'} accepts 10 MiB with paged reads`, () => {
+  const s = session(); s.setup();
+  const initial = portrait ? s.request(1, 'sheet-create', { name: 'Iria', owner: '2' }) : s.request(1, 'scene-create', { name: 'Mapa', kind: 'map' });
+  const target = portrait ? { sheet: initial.campaign.sheets[0].id } : { scene: initial.campaign.scenes[0].id };
+  const person = portrait ? 2 : 1, op = portrait ? 'portrait-part' : 'image-part';
+  const bytes = Buffer.alloc(10 * 1024 * 1024, 17);
+  Buffer.from('89504e470d0a1a0a', 'hex').copy(bytes);
+  const image = 'data:image/png;base64,' + bytes.toString('base64'), total = Math.ceil(image.length / 7000);
+  for (let index = 0; index < total; index++) {
+    const reply = s.request(person, op, { ...target, upload: 'big', index, total, part: image.slice(index * 7000, (index + 1) * 7000) });
+    assert.equal(reply.ok, true, reply.error);
+  }
+  const assetOp = portrait ? 'portrait-asset' : 'asset';
+  let reply = s.request(person, assetOp, target), restored = reply.image;
+  while (reply.proximo) {
+    reply = s.request(person, assetOp, { ...target, ...reply.proximo });
+    assert.equal(reply.ok, true, reply.error);
+    assert.ok(reply.image.length <= 65536); restored += reply.image;
+  }
+  assert.equal(restored, image);
+  assert.ok([...s.disk.values()].every(value => value.length < 4 * 1024 * 1024));
 });

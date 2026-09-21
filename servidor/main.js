@@ -5,7 +5,7 @@
  */
 (() => {
   'use strict';
-  const LIMIT = { sheets: 16, scenes: 16, entries: 100, tokens: 48, walls: 128, image: 262144 };
+  const LIMIT = { sheets: 16, scenes: 16, entries: 100, tokens: 48, walls: 128, image: 10 * 1024 * 1024 };
   const abilities = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
   const skills = [
     ['acrobatics', 'dex', 'Acrobacia'], ['animal-handling', 'wis', 'Adestrar animais'],
@@ -36,26 +36,64 @@
     if (preset !== 'silence' && !Object.hasOwn(ambience, preset)) fail('invalid-music');
     c.music = { preset: preset === 'silence' ? null : preset, playing: preset !== 'silence', position: 0, startedAt: mundo.agora() };
   }
+  const IMAGE_CHUNK = 7000, ASSET_CHUNK = 65536;
+  function imageIndex(raw) {
+    try { const v = JSON.parse(raw); return v?.format === 1 ? v : null; } catch (_) { return null; }
+  }
+  function assetReply(path, r) {
+    const raw = arquivos.ler(path), index = imageIndex(raw);
+    const length = index ? index.length : (raw || '').length;
+    const offset = r.offset === undefined ? 0 : num(r.offset, 0, length);
+    if (r.offset !== undefined && r.asset !== path) fail('image-changed');
+    const end = Math.min(offset + ASSET_CHUNK, length);
+    let image = '';
+    if (index) {
+      let start = 0;
+      for (let i = 0; i < index.parts && start < end; i++) {
+        const size = index.sizes[i];
+        if (start + size > offset) {
+          const part = arquivos.ler(path + '.' + i);
+          if (!part || part.length !== size) fail('image-incomplete');
+          image += part.slice(Math.max(0, offset - start), Math.min(size, end - start));
+        }
+        start += size;
+      }
+    } else image = (raw || '').slice(offset, end);
+    return { ok: true, asset: path, image, ...(end < length ? { proximo: { offset: end, asset: path } } : {}) };
+  }
   function imagePart(c, ctx, target, id, r, ceiling) {
-    const total = num(r.total, 1, 48), index = num(r.index, 0, total - 1), part = text(r.part, 7000);
+    const encodedLimit = 4 * Math.ceil(ceiling / 3) + 64;
+    const total = num(r.total, 1, Math.ceil(encodedLimit / IMAGE_CHUNK));
+    const index = num(r.index, 0, total - 1), part = text(r.part, IMAGE_CHUNK);
     const upload = r.upload ? key(r.upload) : 'legacy-' + ctx.person;
     const base = 'channel-' + ctx.channel + '/' + id;
     if (index === 0) {
-      if (arquivos.listar) arquivos.listar().filter(p => p.startsWith(base + '-image-') && p !== target.asset).forEach(p => arquivos.apagar(p));
-      target.upload = { total, next: 0, length: 0, path: base + '-upload.txt', id: upload, person: ctx.person };
+      if (arquivos.listar) arquivos.listar().filter(p => p.startsWith(base + '-image-') && p !== target.asset && !p.startsWith(target.asset + '.')).forEach(p => arquivos.apagar(p));
+      target.upload = { total, next: 0, length: 0, sizes: [], path: base + '-image-' + (c.revision + 1) + '.parts', id: upload, person: ctx.person };
     }
-    if (!target.upload || target.upload.total !== total || target.upload.next !== index || target.upload.id !== upload || target.upload.person !== ctx.person) fail('upload-order');
-    // File writes can survive a rejected DB commit: trust only committed length.
-    const image = (index ? (arquivos.ler(target.upload.path) || '').slice(0, target.upload.length) : '') + part;
-    if (image.length > ceiling) fail('image-too-large');
-    if (!arquivos.escrever(target.upload.path, image)) fail('disk-failed');
-    target.upload.next++; target.upload.length = image.length;
-    if (index === total - 1) {
-      if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(image)) fail('invalid-image');
-      const path = base + '-image-' + (c.revision + 1) + '.txt';
-      if (!arquivos.escrever(path, image)) fail('disk-failed');
-      arquivos.apagar(target.upload.path); delete target.upload; target.asset = path;
+    const up = target.upload;
+    if (!up || up.total !== total || up.next !== index || up.id !== upload || up.person !== ctx.person) fail('upload-order');
+    const finished = index === total - 1;
+    if (!part.length) fail('invalid-image');
+    let payload = part;
+    if (!index) {
+      const header = /^data:image\/(png|jpeg|webp|gif);base64,/.exec(payload);
+      if (!header) fail('invalid-image');
+      up.header = header[0].length; payload = payload.slice(up.header);
     }
+    if (!(finished ? /^[A-Za-z0-9+/]*={0,2}$/ : /^[A-Za-z0-9+/]*$/).test(payload)) fail('invalid-image');
+    const length = up.length + part.length;
+    if (length > encodedLimit) fail('image-too-large');
+    if (finished) {
+      const encoded = length - up.header;
+      if (encoded % 4) fail('invalid-image');
+      const bytes = encoded / 4 * 3 - (payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0);
+      if (bytes > ceiling) fail('image-too-large');
+    }
+    if (!arquivos.escrever(up.path + '.' + index, part)) fail('disk-failed');
+    up.next++; up.length = length; up.sizes.push(part.length);
+    if (!arquivos.escrever(up.path, JSON.stringify({ format: 1, parts: up.next, length, sizes: up.sizes }))) fail('disk-failed');
+    if (finished) { target.asset = up.path; delete target.upload; }
   }
   function training(raw, allowed, max) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('invalid-training');
@@ -153,13 +191,13 @@
         const s = find(c.scenes, r.scene);
         if (c.gm !== ctx.person && (!s.published || s.id !== c.active)) fail('gm-only');
         if (!s.asset) fail('not-found');
-        return JSON.stringify({ ok: true, asset: s.asset, image: arquivos.ler(s.asset) });
+        return JSON.stringify(assetReply(s.asset, r));
       }
       if (r.op === 'portrait-asset') {
         if (!c) fail('not-found'); const s = find(c.sheets, r.sheet);
         if (ctx.person !== c.gm && s.owner !== ctx.person && !s.portrait?.published) fail('not-owner');
         if (!s.portrait?.asset) fail('not-found');
-        return JSON.stringify({ ok: true, asset: s.portrait.asset, image: arquivos.ler(s.portrait.asset) });
+        return JSON.stringify(assetReply(s.portrait.asset, r));
       }
       if (!ctx.write && !ctx.admin) fail('read-only');
       const nonce = key(r.nonce);
@@ -194,7 +232,7 @@
           case 'portrait-part': {
             const s = find(c.sheets, r.sheet); editable(c, ctx, s);
             s.portrait ||= { asset: null, published: false };
-            imagePart(c, ctx, s.portrait, 'portrait-' + s.id, r, 65536);
+            imagePart(c, ctx, s.portrait, 'portrait-' + s.id, r, LIMIT.image);
             if (r.index === r.total - 1) s.portrait.published = false;
             break;
           }
