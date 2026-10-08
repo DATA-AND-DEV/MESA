@@ -221,6 +221,18 @@ test('GM ambience state resumes from its position and clients cannot forge playb
   s.request(1,'music',{command:'stop'});assert.equal(s.request(3,'view').campaign.music.playing,false);
 });
 
+test('changing the ambience of the scene on the table changes what plays; other scenes wait for reveal',()=>{
+  const s=session();s.setup();let r=s.request(1,'scene-create',{name:'Cripta',kind:'map'});const id=r.campaign.scenes[0].id;
+  r=s.request(1,'scene-create',{name:'Depois',kind:'map'});const later=r.campaign.scenes[1].id;
+  s.request(1,'scene-music',{id,preset:'mystery'});s.request(1,'scene-show',{id});
+  assert.equal(s.request(3,'view').campaign.music.preset,'mystery');
+  s.request(1,'scene-music',{id,preset:'battle'});
+  assert.equal(s.request(3,'view').campaign.music.preset,'battle','the active scene changed its ambience and the table kept the old one');
+  s.request(1,'scene-music',{id:later,preset:'exploration'});
+  assert.equal(s.request(3,'view').campaign.music.preset,'battle','a scene not on the table changed what plays');
+  s.request(1,'scene-music',{id,preset:'inherit'});
+  assert.equal(s.request(3,'view').campaign.music.preset,'battle','inherit on the active scene changed what plays');
+});
 test('scene ambience stays private until reveal; inherit keeps current music and hide silences',()=>{
   const s=session();s.setup();let r=s.request(1,'scene-create',{name:'Segredo',kind:'illustration'});const id=r.campaign.scenes[0].id;
   s.request(1,'scene-music',{id,preset:'battle'});

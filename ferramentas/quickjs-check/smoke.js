@@ -8,9 +8,11 @@
   }
   assert(request(1,'setup',{name:'QuickJS',system:'dnd5e-2014',gm:'1'}).ok,'setup');
   let r=request(1,'sheet-create',{name:'Iria',owner:'2'});const sheet=r.campaign.sheets[0].id;
-  // Near the portrait ceiling, under the native 8 MiB runtime budget.
-  const image='data:image/png;base64,'+'YQ=='.repeat(15000),parts=image.match(/.{1,6000}/g);
-  parts.forEach((part,index)=>assert(request(2,'portrait-part',{sheet,part,index,total:parts.length,upload:'native-image'}).ok,'portrait upload'));
+  // Under the native 8 MiB runtime budget. Valid base64 from end to end: since
+  // the 10 MiB upload (17dc814) the server refuses padding in the middle, and
+  // 'YQ=='.repeat(…) made this check red without anyone running it.
+  const image='data:image/png;base64,'+'YWFh'.repeat(15000),parts=image.match(/.{1,6000}/g);
+  parts.forEach((part,index)=>{const r=request(2,'portrait-part',{sheet,part,index,total:parts.length,upload:'native-image'});assert(r.ok,'portrait upload: '+r.error);});
   assert(request(3,'portrait-asset',{sheet}).error==='not-owner','private portrait');
   assert(request(1,'portrait-publish',{sheet,published:true}).ok,'publish');
   assert(request(3,'portrait-asset',{sheet}).image===image,'public portrait');
@@ -24,5 +26,6 @@
   r=request(1,'scene-create',{name:'Cena',kind:'illustration'});const scene=r.campaign.scenes[0].id;
   assert(request(1,'scene-music',{id:scene,preset:'battle'}).ok,'scene soundtrack');
   assert(request(1,'scene-show',{id:scene}).campaign.music.preset==='battle','reveal');
+  assert(request(1,'scene-music',{id:scene,preset:'mystery'}).campaign.music.preset==='mystery','active scene soundtrack');
   return 'QuickJS 0.12.2 / 8 MiB: portraits, private access, actions, resources and scene music passed.';
 })();

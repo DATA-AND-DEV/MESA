@@ -45,11 +45,14 @@ function world() {
 function client(w, options = {}) {
   const regions = [], themes = [], requests = [], timers = [], errors = [], cartoes = [], pedidosDeCartao = [];
   // As superfícies de pé, por `id`, e os avisos que passaram pela fila.
-  const superficies = new Map(), avisos = [], contribuicoes = [];
+  const superficies = new Map(), avisos = [], contribuicoes = [], montagensRecusadas = [];
   // Os arquivos que uma pessoa «escolheu», por número — o que o produto
   // guardaria. O MOD nunca os vê inteiros: ele pede pedaços.
   const escolhidos = new Map(), soltos = [];
-  const snapshot = { me: 2, open_channel: 1, channels: [{ id: 1 }], presentes: [{ id: 1, nickname: 'Alex' }, { id: 2, nickname: 'Lia' }] };
+  // **A forma do `Snapshot` do produto**: o canal aberto é o que tem `open`.
+  // Este retrato trazia `open_channel`, que o produto nunca mandou, e a suíte
+  // provava a troca de canal por um caminho que a janela não percorre.
+  const snapshot = { me: 2, channels: [{ id: 1, open: true }], presentes: [{ id: 1, nickname: 'Alex' }, { id: 2, nickname: 'Lia' }], ...options.snapshot };
   const sandbox = vm.createContext({
     console: { error: e => errors.push(e) },
     setTimeout: (fn, ms) => { if (ms === 150) { void Promise.resolve().then(fn); } else timers.push(fn); },
@@ -62,7 +65,10 @@ function client(w, options = {}) {
       },
     },
     SeeleUI: {
-      regiao: async tree => { checkTree(tree); cabeNaPonte('regiao', { conteudo: tree }); regions.push(structuredClone(tree)); },
+      regiao: async tree => {
+        if (options.regiao) return options.regiao(tree);
+        checkTree(tree); cabeNaPonte('regiao', { conteudo: tree }); regions.push(structuredClone(tree));
+      },
       tema: async values => { if (options.tema) await options.tema(values); themes.push(structuredClone(values)); },
       // A API 3 completa: a janela fala com o MOD sem que ele tenha perguntado.
       // Um só ouvinte, e o último vence — é o que o produto oferece.
@@ -76,7 +82,10 @@ function client(w, options = {}) {
         // seguidos precisam concatenar no arquivo.
         return bytes.subarray(inicio, inicio + 65535).toString('base64');
       },
-      soltar: async arquivo => { escolhidos.delete(arquivo); soltos.push(arquivo); },
+      soltar: async arquivo => {
+        if (options.soltarRecusado) throw new Error(options.soltarRecusado);
+        escolhidos.delete(arquivo); soltos.push(arquivo);
+      },
       // A única superfície fora da região: uma declaração por pessoa, na mesma
       // gramática, montada pelo renderer do produto na lista dele. Os limites e
       // as recusas aqui são os de `mods-regiao.js` — um MOD que ponha um botão
@@ -115,7 +124,15 @@ function client(w, options = {}) {
             id: chave,
             montar: async arvore => {
               checkTree(arvore);
-              cabeNaPonte('superficie-montar', { superficie: chave, arvore });
+              // **A recusa fica anotada**, além de lançada. O MOD pega o que o
+              // `montar` lança e o diz como aviso — é o que ele deve fazer —, e
+              // um teste que não lesse os avisos via uma página montada.
+              try {
+                cabeNaPonte('superficie-montar', { superficie: chave, arvore });
+              } catch (recusa) {
+                montagensRecusadas.push(recusa.message);
+                throw recusa;
+              }
               tela.arvores.push(structuredClone(arvore));
             },
             classes: async mapa => {
@@ -151,6 +168,7 @@ function client(w, options = {}) {
       // existem — que é o que o produto também responde.
       contribuicoes: {
         registrar: async pedido => {
+          if (options.recusarContribuicao) throw new Error(options.recusarContribuicao);
           const PONTOS = {
             'pessoa.identidade': ['substituir', 'decorar'],
             'pessoa.cartao': ['substituir', 'adicionar'],
@@ -242,6 +260,18 @@ function client(w, options = {}) {
   // simplesmente não estão. Reproduzir isso aqui é o que permite a um MOD
   // provar que degrada em vez de falhar — e é o único jeito de testar a
   // compatibilidade que `APIS_ACEITAS` promete.
+  // **O executor dos apps anteriores à 0.15.1 não tem `console`** (ele chegou
+  // ao executor nativo em `74fa771`, no SEELE). Um MOD da linha legada que o chame
+  // sem conferir lança ali — e, dentro de um `catch`, lança por cima da falha
+  // que estava tratando.
+  //
+  // O V8 põe um `console` próprio em todo contexto, e apagar a chave do
+  // objeto não o tira: é preciso apagá-lo **de dentro**.
+  if (options.semConsole) {
+    delete sandbox.console;
+    vm.runInContext('delete globalThis.console', sandbox);
+    assert.equal(vm.runInContext('typeof console', sandbox), 'undefined', 'o contexto continua com console');
+  }
   if (options.semApi4) {
     delete sandbox.SeeleUI.superficies;
     delete sandbox.SeeleUI.contribuicoes;
@@ -249,6 +279,8 @@ function client(w, options = {}) {
   vm.runInContext(source, sandbox, { timeout: 1000 });
   return {
     regions, themes, requests, timers, errors, snapshot, avisos, contribuicoes,
+    /** As montagens que o produto recusaria por passar do teto por mensagem. */
+    montagensRecusadas,
     /** As superfícies de pé, por `id`. */
     superficies,
     /** A última árvore que o MOD montou numa superfície. */
@@ -435,6 +467,11 @@ function checkTree(tree, depth = 0) {
   if ('dentro' in tree) checkTree(tree.dentro, depth + 1);
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
+/** A pessoa abre outro canal de texto: o produto muda o `open` de cada um. */
+const abrirCanal = (c, id) => {
+  if (!c.snapshot.channels.some(canal => canal.id === id)) c.snapshot.channels.push({ id, open: false });
+  for (const canal of c.snapshot.channels) canal.open = canal.id === id;
+};
 /**
  * Espera várias voltas de microtarefa.
  *
@@ -470,7 +507,7 @@ test('o cliente final executa sem DOM e só consulta o próprio servidor', async
 });
 test('canal ausente limpa o conteúdo anterior e não envia pedidos', async () => {
   const c = client(world()); await settle(); const before = c.requests.length;
-  c.snapshot.channels = []; c.snapshot.open_channel = null; c.tick(); await settle();
+  c.snapshot.channels = []; c.tick(); await settle();
   assert.equal(c.requests.length, before); assert.match(content(c), /canal de texto/);
 });
 test('consulta lenta não agenda outra consulta em paralelo', async () => {
@@ -498,8 +535,26 @@ test('recusa substitui dados antigos e próxima consulta pode recuperar', async 
 test('resposta do canal anterior não é exibida após navegar', async () => {
   let release; const w = world();
   const c = client(w, { request: () => new Promise(resolve => { release = resolve; }) });
-  await settle(); c.snapshot.open_channel = 2; release(w.call({ op: 'view' }, '2')); await settle();
+  await settle(); abrirCanal(c, 2); release(w.call({ op: 'view' }, '2')); await settle();
   assert.match(content(c), /Canal alterado/);
+});
+// **O canal é o que o produto diz que está aberto**, e o produto diz com
+// `channels[].open` (`Channel.open`, em `crates/seele-ffi/src/types.rs`). O
+// `Snapshot` não tem `open_channel`: este teste monta o retrato com a forma que
+// o produto entrega, e não com a que o laboratório inventou.
+//
+// Antes do conserto, `canalDe` lia `open_channel` (ausente) e caía em
+// `channels[0]`: a campanha era sempre a do primeiro canal de texto, qualquer
+// que fosse o canal aberto.
+test('o canal consultado é o que o produto marca como aberto', async () => {
+  const w = world();
+  w.escritaDireta({ op: 'setup', name: 'Mesa do canal 2', system: 'free', gm: '2' }, '1', 2);
+  const c = client(w, {
+    snapshot: { channels: [{ id: 1, name: 'geral', open: false }, { id: 2, name: 'rpg', open: true }] },
+  });
+  await settle();
+  assert.deepEqual(c.requests.map(r => r.channel), [2],
+    'consultou o canal ' + c.requests.map(r => r.channel).join(', ') + ', e o aberto é o 2');
 });
 if (manifest.id === 'seele/mesa') {
   // ---- a mesa virou um espaço, e não um rodapé (U01, U25) ----
@@ -837,6 +892,8 @@ if (manifest.id === 'seele/mesa') {
     const c = client(w, { request: (_i, canal, corpo) => w.call(corpo, '1', canal) });
     await settle();
     await abrirMesa(c);
+    // Só a aba aberta é montada: o compêndio é onde o verbete se edita.
+    await naAba(c, 'compendio');
 
     c.fire({ nome: 'campo', chave: 'v-name', valor: 'Poção' });
     c.fire({ nome: 'campo', chave: 'v-level', valor: '2' });
@@ -872,6 +929,10 @@ if (manifest.id === 'seele/mesa') {
     await settle();
     await abrirMesa(c);
 
+    // O ajuste abre por um gesto: os campos dele levam a descrição e as notas
+    // inteiras, e montados sempre tiravam o espaço do tabuleiro na montagem.
+    assert.ok(naMesa(c).has('ajustar-cena'), 'não há como abrir o ajuste da cena');
+    c.fire({ nome: 'botao', chave: 'ajustar-cena' }); await assentar();
     assert.ok(naMesa(c).has('c-cols'), 'não há ajuste de grade');
     c.fire({ nome: 'campo', chave: 'c-cols', valor: '30' });
     c.fire({ nome: 'campo', chave: 'c-rows', valor: '20' });
@@ -1078,6 +1139,41 @@ if (manifest.id === 'seele/mesa') {
     assert.equal(tocador.tocando, true, 'a trilha foi escolhida e não começou a tocar');
   });
 
+  // **O que toca é o que o servidor diz que toca.** O servidor aplica a trilha
+  // da cena ao mostrá-la e guarda o resultado em `music`; o cliente refazia a
+  // conta pela cena e discordava dele: com a cena em silêncio, a trilha que o
+  // mestre escolhia para a mesa nunca tocava, e a mesa dizia «Trilha
+  // escolhida: silence. Este pacote não traz o som dela.»
+  test('MESA: a trilha que o mestre escolhe toca mesmo com a cena em silêncio', async () => {
+    const w = world();
+    w.escritaDireta({ op: 'setup', name: 'Casa', system: 'free', gm: '1' });
+    const id = w.escritaDireta({ op: 'scene-create', name: 'Cripta', kind: 'map' }).campaign.scenes.at(-1).id;
+    w.escritaDireta({ op: 'scene-music', id, preset: 'silence' });
+    w.escritaDireta({ op: 'scene-show', id });
+    const c = client(w, { request: (_i, canal, corpo) => w.call(corpo, '1', canal) });
+    await settle(); await abrirMesa(c);
+    assert.doesNotMatch(oQueAMesaDiz(c), /não traz o som/, 'o silêncio foi dito como uma trilha que falta');
+
+    c.fire({ nome: 'escolha', chave: 'trilha-mesa', valor: 'battle' });
+    await assentar(20);
+    const tocador = [...naMesa(c).values()].find(n => String(n.chave || '').startsWith('trilha:'));
+    assert.equal(tocador?.chave, 'trilha:battle', 'a trilha escolhida pelo mestre não tocou: ' + oQueAMesaDiz(c).match(/Trilha[^"]*/)?.[0]);
+    assert.equal(tocador.tocando, true);
+  });
+  test('MESA: mudar a trilha da cena que está na mesa muda o que toca', async () => {
+    const w = world();
+    w.escritaDireta({ op: 'setup', name: 'Casa', system: 'free', gm: '1' });
+    const id = w.escritaDireta({ op: 'scene-create', name: 'Cripta', kind: 'map' }).campaign.scenes.at(-1).id;
+    w.escritaDireta({ op: 'scene-music', id, preset: 'mystery' });
+    w.escritaDireta({ op: 'scene-show', id });
+    const c = client(w, { request: (_i, canal, corpo) => w.call(corpo, '1', canal) });
+    await settle(); await abrirMesa(c);
+    c.fire({ nome: 'escolha', chave: 'trilha', valor: 'battle' });
+    await assentar(20);
+    const tocador = [...naMesa(c).values()].find(n => String(n.chave || '').startsWith('trilha:'));
+    assert.equal(tocador?.chave, 'trilha:battle', 'a trilha da cena ativa mudou e a mesa continuou com a anterior');
+  });
+
   // ---- a degradação é explícita, e ela é testada ----
   test('MESA: sem superfícies, a faixa volta a ser a mesa inteira', async () => {
     const w = world();
@@ -1129,7 +1225,7 @@ if (manifest.id === 'seele/mesa') {
     w.escritaDireta({ op: 'setup', name: 'A Outra', system: 'free', gm: '1' }, '1', 2);
     w.escritaDireta({ op: 'sheet-create', name: 'Outra ficha', owner: '1' }, '1', 2);
 
-    c.snapshot.open_channel = 2;
+    abrirCanal(c, 2);
     c.tick();
     await assentar(20);
 
@@ -1172,6 +1268,298 @@ if (manifest.id === 'seele/mesa') {
     c.fire({ nome: 'traco', chave: 'tabuleiro', fase: 'terminou', x: 300, y: 300, alvo: null });
     await settle(); await settle();
     assert.equal(c.requests.length, antes, 'um toque no vazio mandou pedido ao servidor');
+  });
+
+  // **A grade inteira cabe na tela.** O servidor aceita até 60 × 60 casas, a
+  // tela tem teto de 1024 px, e a casa tinha 26 px fixos: da coluna 40 em
+  // diante as peças ficavam fora da tela, e nenhum toque as alcançava.
+  test('MESA: uma cena de 60 colunas cabe inteira na tela, e a última coluna se alcança', async () => {
+    const w = world();
+    w.escritaDireta({ op: 'setup', name: 'Casa', system: 'free', gm: '1' });
+    const id = w.escritaDireta({ op: 'scene-create', name: 'Planície', kind: 'map' }).campaign.scenes.at(-1).id;
+    w.escritaDireta({ op: 'scene-save', id, name: 'Planície', description: '', notes: '', cols: 60, rows: 30 });
+    w.escritaDireta({ op: 'token-add', scene: id, name: 'Batedor', x: 50, y: 20 });
+    w.escritaDireta({ op: 'scene-show', id });
+    const c = client(w, { request: (_i, canal, corpo) => w.call(corpo, '1', canal) });
+    await settle(); await abrirMesa(c);
+    const tela = [...naMesa(c).values()].find(n => n.forma === 'tela');
+    const peca = tela.figuras.find(f => String(f.chave || '').startsWith('peca:'));
+    assert.ok(peca.x < tela.largura && peca.y < tela.altura,
+      `a peça da coluna 50 ficou fora da tela: x ${peca.x} numa tela de ${tela.largura}`);
+    // Arrastá-la até a borda direita a leva à última coluna.
+    c.fire({ nome: 'traco', chave: 'tabuleiro', fase: 'comecou', x: peca.x, y: peca.y, alvo: peca.chave });
+    c.fire({ nome: 'traco', chave: 'tabuleiro', fase: 'terminou', x: tela.largura - 1, y: peca.y, alvo: peca.chave });
+    await assentar();
+    assert.equal(w.call({ op: 'view' }, '1').campaign.scenes[0].tokens[0].x, 59, 'a última coluna não se alcança');
+  });
+
+  // ---- a ficha e a peça de quem joga ----
+  //
+  // O servidor sabe entregar uma ficha (`sheet-owner`) e pôr na mesa a peça de
+  // uma ficha (`token-add` com `sheet`), e só deixa quem joga mover a peça da
+  // própria ficha. O cliente criava toda ficha em nome do mestre e toda peça
+  // sem ficha: quem jogava nunca tinha ficha nem peça que pudesse mover.
+  test('MESA: o mestre entrega a ficha a uma jogadora, e ela a vê', async () => {
+    const w = world();
+    w.escritaDireta({ op: 'setup', name: 'A Casa', system: 'free', gm: '1' });
+    w.escritaDireta({ op: 'sheet-create', name: 'Iria', owner: '1' });
+    const c = client(w, { snapshot: { me: 1 }, request: (_i, canal, corpo) => w.call(corpo, '1', canal) });
+    await settle();
+    await abrirMesa(c);
+    const ficha = w.call({ op: 'view' }, '1').campaign.sheets.at(-1);
+    c.fire({ nome: 'botao', chave: 'abrir-ficha-' + ficha.id }); await assentar();
+    const dono = naMesa(c).get('dono');
+    assert.ok(dono, 'a ficha aberta não oferece a quem ela pertence: ' + oQueAMesaDiz(c));
+    assert.ok(dono.opcoes.some(o => o.valor === '2'), 'quem está no servidor não aparece entre os donos possíveis');
+    c.fire({ nome: 'escolha', chave: 'dono', valor: '2' }); await assentar();
+    assert.equal(w.call({ op: 'view' }, '2').campaign.sheets.length, 1, 'a jogadora não recebeu a ficha');
+  });
+  test('MESA: a peça de uma ficha vai à mesa, e quem joga a arrasta', async () => {
+    const w = world();
+    w.escritaDireta({ op: 'setup', name: 'A Casa', system: 'free', gm: '1' });
+    w.escritaDireta({ op: 'sheet-create', name: 'Iria', owner: '2' });
+    const id = w.escritaDireta({ op: 'scene-create', name: 'Salão', kind: 'map' }).campaign.scenes.at(-1).id;
+    w.escritaDireta({ op: 'scene-show', id });
+    const mestre = client(w, { snapshot: { me: 1 }, request: (_i, canal, corpo) => w.call(corpo, '1', canal) });
+    await settle();
+    await abrirMesa(mestre);
+    const ficha = w.call({ op: 'view' }, '1').campaign.sheets.at(-1);
+    mestre.fire({ nome: 'botao', chave: 'abrir-ficha-' + ficha.id }); await assentar();
+    assert.ok(naMesa(mestre).has('por-na-mesa'), 'a ficha aberta não põe a peça dela na mesa: ' + oQueAMesaDiz(mestre));
+    mestre.fire({ nome: 'botao', chave: 'por-na-mesa' }); await assentar();
+    const peca = w.call({ op: 'view' }, '1').campaign.scenes[0].tokens.at(-1);
+    assert.equal(peca?.sheet, ficha.id, 'a peça não ficou ligada à ficha');
+
+    // A jogadora arrasta a peça dela.
+    const jogadora = client(w, { request: (_i, canal, corpo) => w.call(corpo, '2', canal) });
+    await settle();
+    await abrirMesa(jogadora);
+    const tela = [...naMesa(jogadora).values()].find(n => n.forma === 'tela');
+    const figura = tela.figuras.find(f => f.chave === 'peca:' + peca.id);
+    jogadora.fire({ nome: 'traco', chave: 'tabuleiro', fase: 'comecou', x: figura.x, y: figura.y, alvo: figura.chave });
+    jogadora.fire({ nome: 'traco', chave: 'tabuleiro', fase: 'terminou', x: 26 * 4 + 5, y: 26 * 2 + 5, alvo: figura.chave });
+    await assentar();
+    const movida = w.call({ op: 'view' }, '1').campaign.scenes[0].tokens.at(-1);
+    assert.deepEqual([movida.x, movida.y], [4, 2], 'a jogadora não moveu a própria peça');
+  });
+
+  test('MESA: quem joga não recebe o botão de iniciativa que o servidor recusaria', async () => {
+    const w = world();
+    w.escritaDireta({ op: 'setup', name: 'A Casa', system: 'free', gm: '1' });
+    w.escritaDireta({ op: 'sheet-create', name: 'Iria', owner: '2' });
+    const jogadora = client(w, { request: (_i, canal, corpo) => w.call(corpo, '2', canal) });
+    await settle(); await abrirMesa(jogadora);
+    const ficha = w.call({ op: 'view' }, '2').campaign.sheets[0];
+    jogadora.fire({ nome: 'botao', chave: 'abrir-ficha-' + ficha.id }); await assentar();
+    assert.ok(naMesa(jogadora).has('ferir'), 'a ficha da jogadora não abriu');
+    assert.ok(!naMesa(jogadora).has('iniciativa-add'),
+      'quem joga recebeu PÔR NA INICIATIVA, e o servidor recusa com gm-only');
+
+    // E o vazio da iniciativa, para quem mestra, nomeia o botão que existe.
+    const mestre = client(w, { snapshot: { me: 1 }, request: (_i, canal, corpo) => w.call(corpo, '1', canal) });
+    await settle(); await abrirMesa(mestre);
+    await naAba(mestre, 'iniciativa');
+    assert.match(oQueAMesaDiz(mestre), /PÔR NA INICIATIVA/, 'o vazio da iniciativa manda apertar um botão que não existe');
+  });
+
+  // ---- sem `console`, como nos apps anteriores à 0.15.1 ----
+  test('MESA: sem console, um soltar recusado não troca o desfecho do envio', async () => {
+    const w = world();
+    w.escritaDireta({ op: 'setup', name: 'A Casa', system: 'free', gm: '1' });
+    const id = w.escritaDireta({ op: 'scene-create', name: 'Salão', kind: 'map' }).campaign.scenes.at(-1).id;
+    w.escritaDireta({ op: 'scene-show', id });
+    const c = client(w, {
+      semConsole: true,
+      soltarRecusado: 'arquivo-nao-esta-de-pe',
+      request: (_i, canal, corpo) => w.call(corpo, '1', canal),
+    });
+    await settle();
+    await abrirMesa(c);
+    c.escolher('mapa', Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(3000, 7)]));
+    await assentar(30);
+    assert.ok(w.call({ op: 'view' }, '1').campaign.scenes[0].asset, 'o mapa não chegou ao servidor');
+    assert.match(oQueAMesaDiz(c), /mapa enviado/,
+      'o envio deu certo e a mesa disse outra coisa: ' + oQueAMesaDiz(c).match(/console[^"]*/)?.[0]);
+  });
+  test('sem console, uma falha ao dizer a falha não vira promessa rejeitada', async () => {
+    const rejeitadas = [];
+    const anotar = motivo => rejeitadas.push(String(motivo?.message ?? motivo));
+    process.on('unhandledRejection', anotar);
+    try {
+      const c = client(world(), {
+        semConsole: true,
+        semApi4: true,
+        request: () => Promise.reject(Error('timeout')),
+        regiao: () => Promise.reject(Error('a região saiu')),
+      });
+      await assentar(20);
+      assert.equal(c.timers.length, 1, 'o relógio não voltou a ser marcado');
+    } finally {
+      await assentar(5);
+      process.off('unhandledRejection', anotar);
+    }
+    assert.deepEqual(rejeitadas, [], 'a casca deixou uma promessa rejeitada sem tratamento');
+  });
+
+  // **A porta recusada é dita.** A entrada de navegação é o único jeito de
+  // abrir a mesa; recusada, o MOD escrevia `console.warn` — que antes da 0.15.1 nem
+  // existe na metade de janela — e tentava de novo a cada consulta, calado.
+  test('MESA: a entrada recusada é dita uma vez, e não só ao registro', async () => {
+    const w = world();
+    const c = client(w, { recusarContribuicao: 'um MOD mantém até 128 contribuições de pé' });
+    await assentar();
+    c.tick(); await assentar();
+    const ditos = c.avisos.filter(a => /128 contribuições/.test(a.mensagem));
+    assert.equal(ditos.length, 1, 'a recusa da entrada não foi dita uma vez: ' + JSON.stringify(c.avisos));
+    assert.match(ditos[0].mensagem, /Mesa/);
+  });
+
+  // ---- a revisão e o rascunho ----
+  //
+  // A revisão é da campanha inteira, e o cliente manda a da última projeção
+  // que viu — a consulta de dois segundos a renova. Ela não protegia o
+  // rascunho (que nasce numa revisão e grava com a seguinte) e recusava todo
+  // comando que alguém precedesse por menos de dois segundos.
+  test('MESA: gravar a ficha não desfaz o dano que chegou durante a edição', async () => {
+    const w = world();
+    w.escritaDireta({ op: 'setup', name: 'A Casa', system: 'free', gm: '1' });
+    w.escritaDireta({ op: 'sheet-create', name: 'Iria', owner: '1' });
+    const c = client(w, { request: (_i, canal, corpo) => w.call(corpo, '1', canal) });
+    await settle();
+    await abrirMesa(c);
+    const ficha = w.call({ op: 'view' }, '1').campaign.sheets.at(-1);
+    c.fire({ nome: 'botao', chave: 'abrir-ficha-' + ficha.id }); await assentar();
+    c.fire({ nome: 'campo', chave: 'f-notes', valor: 'Deve um favor ao ferreiro.' }); await assentar();
+
+    // Noutra janela, o mestre fere a ficha; a consulta seguinte traz o dano.
+    w.escritaDireta({ op: 'vitality', sheet: ficha.id, kind: 'damage', amount: 4 });
+    c.tick(); await assentar();
+
+    c.fire({ nome: 'botao', chave: 'gravar-ficha' }); await assentar();
+    const salva = w.call({ op: 'view' }, '1').campaign.sheets.at(-1);
+    assert.equal(salva.notes, 'Deve um favor ao ferreiro.', 'a nota não foi gravada');
+    assert.equal(salva.hp, ficha.hp - 4, 'gravar a nota desfez o dano que chegou durante a edição');
+  });
+  test('MESA: abrir outra ficha não leva o rascunho da anterior', async () => {
+    const w = world();
+    w.escritaDireta({ op: 'setup', name: 'A Casa', system: 'free', gm: '1' });
+    w.escritaDireta({ op: 'sheet-create', name: 'Iria', owner: '1' });
+    w.escritaDireta({ op: 'sheet-create', name: 'Brann', owner: '1' });
+    const c = client(w, { request: (_i, canal, corpo) => w.call(corpo, '1', canal) });
+    await settle();
+    await abrirMesa(c);
+    const [iria, brann] = w.call({ op: 'view' }, '1').campaign.sheets;
+    c.fire({ nome: 'botao', chave: 'abrir-ficha-' + iria.id }); await assentar();
+    c.fire({ nome: 'campo', chave: 'f-notes', valor: 'Só da Iria.' }); await assentar();
+    c.fire({ nome: 'botao', chave: 'abrir-ficha-' + brann.id }); await assentar();
+    assert.equal(naMesa(c).get('f-notes').valor, '', 'a nota da Iria apareceu na ficha do Brann');
+    assert.equal(naMesa(c).get('gravar-ficha').desligado, true, 'a ficha recém-aberta já nasceu com o que gravar');
+    c.fire({ nome: 'botao', chave: 'gravar-ficha' }); await assentar();
+    const depois = w.call({ op: 'view' }, '1').campaign.sheets;
+    assert.equal(depois.find(s => s.id === brann.id).notes, '', 'a nota da Iria foi gravada no Brann');
+  });
+  test('MESA: um comando não é recusado porque outra pessoa escreveu antes da consulta', async () => {
+    const w = world();
+    w.escritaDireta({ op: 'setup', name: 'A Casa', system: 'free', gm: '1' });
+    const c = client(w, { request: (_i, canal, corpo) => w.call(corpo, '1', canal) });
+    await settle();
+    await abrirMesa(c);
+    // Uma jogadora rola entre duas consultas do mestre.
+    w.escritaDireta({ op: 'roll', formula: '1d6', label: 'Dela' }, '2');
+    c.fire({ nome: 'campo', chave: 'formula', valor: '1d20' });
+    c.fire({ nome: 'botao', chave: 'rolar' }); await assentar();
+    const registro = w.call({ op: 'view' }, '1').campaign.log;
+    assert.equal(registro.length, 2, 'a rolagem do mestre foi recusada: ' + JSON.stringify(c.avisos.at(-1)));
+    assert.doesNotMatch(oQueAMesaDiz(c), /conflict/, 'a mesa disse «conflict» a quem só rolou um dado');
+  });
+  test('MESA: o envio de um mapa sobrevive a uma rolagem no meio', async () => {
+    const w = world();
+    w.escritaDireta({ op: 'setup', name: 'A Casa', system: 'free', gm: '1' });
+    const id = w.escritaDireta({ op: 'scene-create', name: 'Salão', kind: 'map' }).campaign.scenes.at(-1).id;
+    w.escritaDireta({ op: 'scene-show', id });
+    let partes = 0;
+    const c = client(w, {
+      request: (_i, canal, corpo) => {
+        const resposta = w.call(corpo, '1', canal);
+        // Depois do primeiro fragmento, alguém rola um dado.
+        if (corpo.op === 'image-part' && resposta.ok && ++partes === 1) {
+          w.escritaDireta({ op: 'roll', formula: '1d6', label: 'Dela' }, '2');
+        }
+        return resposta;
+      },
+    });
+    await settle();
+    await abrirMesa(c);
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(20000, 7)]);
+    c.escolher('mapa', png);
+    await assentar(60);
+    const cena = w.call({ op: 'view' }, '1').campaign.scenes.find(s => s.id === id);
+    assert.ok(cena.asset, 'o envio do mapa parou no meio: ' + JSON.stringify(c.avisos.at(-1)) + oQueAMesaDiz(c).match(/conflict[^"]*/)?.[0]);
+  });
+
+  // ---- a página cabe numa mensagem da ponte ----
+  //
+  // O produto recusa toda mensagem do MOD acima de 12 KiB (`TETO_DA_MENSAGEM`,
+  // em `apps/seele-app/src/executor.rs`), e `superficie-montar` é uma mensagem
+  // só, com a página inteira. Medido no laboratório com o prelúdio real, em
+  // 08/10/2026: uma cena 20 × 14 com 4 peças, 4 fichas, 10 verbetes e 20
+  // rolagens dava **27.159 bytes**, a página não montava, e a tela dizia
+  // «mensagem-grande». As cinco abas iam juntas em toda montagem.
+  /** Uma campanha de uso normal: o que uma noite de jogo junta. */
+  const semearUmaNoite = w => {
+    w.escritaDireta({ op: 'setup', name: 'A Casa', system: 'dnd5e-2014', gm: '1' });
+    const id = w.escritaDireta({ op: 'scene-create', name: 'Salão', kind: 'map' }).campaign.scenes.at(-1).id;
+    for (let i = 0; i < 4; i += 1) w.escritaDireta({ op: 'token-add', scene: id, name: 'Goblin ' + i, x: i, y: 0 });
+    w.escritaDireta({ op: 'scene-show', id });
+    for (let i = 0; i < 4; i += 1) w.escritaDireta({ op: 'sheet-create', name: 'Personagem ' + i, owner: '1' });
+    for (let i = 0; i < 10; i += 1) {
+      w.escritaDireta({ op: 'entry-save', name: 'Verbete ' + i, kind: 'magia', level: 3, description: 'á'.repeat(200), published: true });
+    }
+    for (let i = 0; i < 20; i += 1) w.escritaDireta({ op: 'roll', formula: '1d20+3', label: 'Ataque ' + i });
+  };
+  test('MESA: a página de uma noite de jogo cabe numa montagem, em todas as abas', async () => {
+    const w = world();
+    semearUmaNoite(w);
+    const c = client(w, { request: (_i, canal, corpo) => w.call(corpo, '1', canal) });
+    await settle();
+    await abrirMesa(c);
+    assert.ok([...naMesa(c).values()].some(n => n.forma === 'tela'), 'o tabuleiro não montou: '
+      + JSON.stringify(c.montagensRecusadas));
+    await naAba(c, 'fichas');
+    const abrir = [...naMesa(c).keys()].find(k => k.startsWith('abrir-ficha-'));
+    assert.ok(abrir, 'a aba de fichas não montou: ' + JSON.stringify(c.montagensRecusadas));
+    c.fire({ nome: 'botao', chave: abrir }); await assentar();
+    assert.ok(naMesa(c).has('gravar-ficha'), 'a ficha aberta não montou');
+    await naAba(c, 'compendio');
+    assert.match(oQueAMesaDiz(c), /Verbete 9/, 'o compêndio não montou');
+    await naAba(c, 'iniciativa');
+    await naAba(c, 'registro');
+    assert.match(oQueAMesaDiz(c), /Ataque 19/, 'o registro não montou');
+    assert.deepEqual(c.montagensRecusadas, [], 'o produto recusaria estas montagens');
+  });
+  test('MESA: no limite da campanha a página continua montando, e diz o que ficou de fora', async () => {
+    const w = world();
+    w.escritaDireta({ op: 'setup', name: 'A Casa', system: 'dnd5e-2014', gm: '1' });
+    const id = w.escritaDireta({ op: 'scene-create', name: 'Fortaleza', kind: 'map' }).campaign.scenes.at(-1).id;
+    w.escritaDireta({ op: 'scene-save', id, name: 'Fortaleza', description: 'é'.repeat(2000), notes: 'ô'.repeat(3000), cols: 60, rows: 60 });
+    // As paredes de uma fortaleza: quatro muros de 32 casas.
+    for (const y of [5, 20, 35, 50]) for (let x = 10; x < 42; x += 1) w.escritaDireta({ op: 'wall', scene: id, x, y });
+    for (let i = 0; i < 48; i += 1) w.escritaDireta({ op: 'token-add', scene: id, name: 'Soldado ' + i, x: i, y: 0 });
+    w.escritaDireta({ op: 'scene-show', id });
+    for (let i = 0; i < 16; i += 1) w.escritaDireta({ op: 'sheet-create', name: 'Personagem ' + i, owner: '1' });
+    for (let i = 0; i < 40; i += 1) {
+      w.escritaDireta({ op: 'entry-save', name: 'Verbete ' + i, kind: 'magia', level: 3, description: 'ã'.repeat(2000), published: true });
+    }
+    for (let i = 0; i < 40; i += 1) w.escritaDireta({ op: 'roll', formula: '1d20+3', label: 'Ataque ' + i });
+    const c = client(w, { request: (_i, canal, corpo) => w.call(corpo, '1', canal) });
+    await settle();
+    await abrirMesa(c);
+    for (const aba of ['fichas', 'compendio', 'iniciativa', 'registro']) await naAba(c, aba);
+    assert.deepEqual(c.montagensRecusadas, [], 'o produto recusaria estas montagens');
+    // O que não coube é dito: uma lista cortada calada é a mesa mentindo.
+    assert.match(oQueAMesaDiz(c), /não cabe/, 'o registro foi cortado sem dizer');
+    await naAba(c, 'compendio');
+    assert.match(oQueAMesaDiz(c), /não cabe/, 'o compêndio foi cortado sem dizer');
   });
 }
 if (manifest.id === 'seele/perfis') {
@@ -1322,7 +1710,6 @@ if (manifest.id === 'seele/perfis') {
     assert.ok(c.cartoes()['2'], 'o cartão não chegou à lista');
     // Fora de canal não há perfil de ninguém: um cartão de antes seria uma
     // afirmação sobre gente que este MOD não está mais vendo.
-    c.snapshot.open_channel = null;
     c.snapshot.channels = [];
     c.tick(); await settle();
     assert.deepEqual(c.cartoes(), {}, 'o cartão sobreviveu à saída do canal: ' + JSON.stringify(c.cartoes()));

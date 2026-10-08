@@ -1,4 +1,4 @@
-/* Gerado por ferramentas/build.mjs. API 3. */
+/* Gerado por ferramentas/build.mjs. API 4. */
 (() => {
 "use strict";
 // Executado exclusivamente no executor do MOD. Cada pacote inclui sua cópia.
@@ -80,8 +80,29 @@ function interfaceMod(id, titulo, intervalo = 4000) {
   const arquivo = (chave, dentro, extra) => ({ forma: 'arquivo', chave, dentro: String(dentro), ...extra });
   const midia = (chave, extra) => ({ forma: 'midia', chave, ...extra });
 
+  // **O canal aberto é o que o produto marca com `open`.** O `Snapshot` do
+  // SEELE não tem `open_channel` — cada canal de texto diz se é o que está
+  // sendo lido (`Channel.open`, em `crates/seele-ffi/src/types.rs`), e é assim
+  // que a lista de canais do próprio produto o encontra. Ler `open_channel`
+  // caía sempre em `channels[0]`: a campanha era a do primeiro canal, qualquer
+  // que fosse o aberto. O primeiro canal continua sendo a resposta quando
+  // nenhum está aberto, que é o instante entre entrar e o produto abrir um.
+  /**
+   * Uma linha no registro de quem roda o MOD, **se houver registro**.
+   *
+   * Chama o `console` só quando ele existe: o executor nativo dos apps
+   * anteriores à v0.15.1 não tem um (ele chegou nela, no commit `74fa771` do
+   * SEELE).
+   * Chamado sem conferir, ele lança — e, dentro de um `catch`, lança por cima
+   * da falha que estava sendo tratada. Os três MODs oficiais usam o mesmo.
+   */
+  const anotar = texto => {
+    if (typeof console !== 'undefined' && typeof console.error === 'function') console.error(texto);
+  };
+
   const canalDe = snapshot => {
-    const id = snapshot.open_channel ?? snapshot.channels?.[0]?.id;
+    const id = snapshot.channels?.find(c => c?.open === true)?.id
+      ?? snapshot.channels?.[0]?.id;
     return Number.isSafeInteger(id) && id > 0 ? id : null;
   };
 
@@ -296,7 +317,9 @@ function interfaceMod(id, titulo, intervalo = 4000) {
         }
       } catch (erro) {
         try { await recado('Não foi possível atualizar: ' + (erro.message || String(erro)), 'erro'); }
-        catch (falha) { console.error(titulo + ': ' + (falha.message || String(falha))); }
+        // Sem `console` (antes da 0.15.1), chamá-lo direto lançaria de dentro
+        // deste `catch`, e a volta acabaria numa promessa rejeitada.
+        catch (falha) { anotar(titulo + ': ' + (falha.message || String(falha))); }
       } finally {
         // Agenda depois de concluir: nunca sobrepõe consultas nem repete
         // escritas. O SEELE encerra o executor e seus temporizadores ao sair.
@@ -309,7 +332,7 @@ function interfaceMod(id, titulo, intervalo = 4000) {
   return {
     // API 3
     texto, cabecalho, lista, campo, escolha, botao, linha, arquivo, midia,
-    request, iniciar, desenhar, dizer, agruparAtualizacoes,
+    request, iniciar, desenhar, dizer, agruparAtualizacoes, anotar,
     // API 4 — composição
     caixa, pilha, grade, rolagem, separador, espaco,
     // API 4 — controle
@@ -348,7 +371,7 @@ const {
   caixa, pilha, grade, separador, espaco,
   acoes, abas, aba, formulario, textoLongo, numero, distintivo,
   request, iniciar, temSuperficies, temContribuicoes,
-  pagina, dialogo, contribuir, entrada, avisar, agruparAtualizacoes,
+  pagina, dialogo, contribuir, entrada, avisar, agruparAtualizacoes, anotar,
 } = interfaceMod('seele/mesa', 'MESA', 2000);
 
 /** A aba aberta na página da mesa. */
@@ -357,11 +380,22 @@ let abaAberta = 'tabuleiro';
 const telas = { mesa: null, criar: null };
 /** A entrada de navegação já foi registrada nesta sessão? */
 let entradaRegistrada = false;
+/** A última recusa da entrada que foi dita, para não dizê-la a cada consulta. */
+let recusaDaEntradaDita = '';
 
-/** O lado de uma célula na tela, em pixels. */
+/** O lado de uma célula na tela, em pixels, quando a grade cabe. */
 const CELULA = 26;
 /** O maior lado de tela que o produto monta. */
 const LADO_MAXIMO = 1024;
+/**
+ * O lado da casa desta cena: 26 px, ou menos quando a grade não cabe.
+ *
+ * O servidor aceita até 60 × 60 casas, e 60 × 26 px passa do teto da tela.
+ * Com a casa fixa, da coluna 40 em diante as peças eram desenhadas fora da
+ * tela e nenhum toque as alcançava.
+ */
+const ladoDaCasa = cena =>
+  Math.min(CELULA, Math.floor(LADO_MAXIMO / Math.max(cena.cols, cena.rows, 1)));
 
 let ultimo = null;
 let aviso = '';
@@ -376,6 +410,68 @@ const rascunho = { campanha: '', cena: '', ficha: '', peca: '', dano: '', entrad
   sistema: 'free', gm: '' };
 /** A ficha sendo editada, campo a campo, até alguém gravar. */
 let fichaEmEdicao = null;
+/**
+ * A ficha como o servidor a tinha quando a edição começou.
+ *
+ * É contra ela que se sabe o que a pessoa mudou. Gravar o rascunho inteiro
+ * devolvia ao servidor os pontos de vida, os espaços gastos e as magias da
+ * hora em que a edição começou: o dano que o mestre deu enquanto alguém
+ * escrevia uma nota era desfeito ao gravar a nota, sem recusa e sem aviso.
+ */
+let baseDaFicha = null;
+
+/**
+ * O que a pessoa mudou, sobre o que o servidor tem agora.
+ *
+ * Campo a campo: o que o rascunho não mudou em relação à base vem do atual.
+ * Objetos (os atributos) e listas de objetos do mesmo tamanho (os espaços de
+ * magia) são comparados por dentro; o resto — textos, números, a lista de
+ * magias preparadas — vale inteiro.
+ */
+function mesclar(base, rascunho, atual) {
+  const igual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  if (igual(rascunho, base)) return atual;
+  const objeto = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  if (Array.isArray(rascunho) && Array.isArray(base) && Array.isArray(atual)
+    && rascunho.length === base.length && base.length === atual.length
+    && rascunho.every(objeto)) {
+    return rascunho.map((item, i) => mesclar(base[i], item, atual[i]));
+  }
+  if (objeto(rascunho) && objeto(base) && objeto(atual)) {
+    const junto = { ...atual };
+    for (const chave of Object.keys(rascunho)) junto[chave] = mesclar(base[chave], rascunho[chave], atual[chave]);
+    return junto;
+  }
+  return rascunho;
+}
+
+/** O rascunho da ficha, nascido do servidor na primeira mudança. */
+function rascunharFicha(ficha) {
+  if (fichaEmEdicao === null) baseDaFicha = JSON.parse(JSON.stringify(ficha));
+  fichaEmEdicao = JSON.parse(JSON.stringify(fichaEmEdicao ?? ficha));
+  return fichaEmEdicao;
+}
+
+/** Larga o rascunho da ficha e a base dele. */
+function largarRascunhoDaFicha() {
+  fichaEmEdicao = null;
+  baseDaFicha = null;
+}
+
+/**
+ * A ficha que a pessoa vê e grava: o rascunho sobre o servidor de agora.
+ *
+ * Os espaços gastos nunca passam do máximo: o servidor recusa `used > max`, e
+ * um máximo baixado no rascunho enquanto alguém conjurava não pode virar uma
+ * recusa sem explicação.
+ */
+function fichaMesclada(ficha) {
+  // O rascunho é de uma ficha: sobre outra, ele não vale nada.
+  if (fichaEmEdicao === null || baseDaFicha?.id !== ficha.id) return ficha;
+  const junta = mesclar(baseDaFicha, fichaEmEdicao, ficha);
+  junta.slots = (junta.slots ?? []).map(s => ({ ...s, used: Math.min(s.used ?? 0, s.max ?? 0) }));
+  return junta;
+}
 /** Pintar parede em vez de arrastar peça: a mesma tela, dois modos. */
 let modoParede = false;
 
@@ -429,6 +525,12 @@ let acaoEmEdicao = null;
 let verbeteEmEdicao = null;
 /** A cena sendo ajustada: grade, descrição e notas. */
 let cenaEmEdicao = null;
+/**
+ * O ajuste da cena está aberto? Ele abre por um gesto: os campos dele levam a
+ * descrição e as notas inteiras, até 5.000 caracteres, e montá-los sempre
+ * tirava da aba do tabuleiro o espaço do próprio tabuleiro.
+ */
+let ajustandoCena = false;
 
 /** Os seis atributos, na ordem de sempre. */
 const ATRIBUTOS = [['str', 'FOR'], ['dex', 'DES'], ['con', 'CON'], ['int', 'INT'], ['wis', 'SAB'], ['cha', 'CAR']];
@@ -438,6 +540,97 @@ let fichaAberta = null;
 const FRAGMENTO = 7000;
 /** A peça sendo arrastada e onde ela está agora, para a tela acompanhar. */
 let arrastando = null;
+
+// ------------------------------------------------- o que cabe numa montagem
+
+/**
+ * Quanto cabe numa montagem: o teto por mensagem do produto, menos o envelope.
+ *
+ * # O defeito que ele fecha
+ *
+ * O produto recusa toda mensagem do MOD acima de 12 KiB
+ * (`TETO_DA_MENSAGEM`, em `apps/seele-app/src/executor.rs`), e
+ * `superficie-montar` é uma mensagem só, com a página inteira. Esta página
+ * mandava as cinco abas em toda montagem: medido no laboratório com o
+ * prelúdio real, em 08/10/2026, uma cena 20 × 14 com 4 peças, 4 fichas, 10
+ * verbetes e 20 rolagens davam 27.159 bytes, a página não montava, e a tela
+ * dizia «mensagem-grande». Quarenta rolagens sozinhas já passavam.
+ *
+ * O envelope — `tipo`, `n` e o nome da superfície — fica de fora com folga.
+ */
+const TETO_DA_MONTAGEM = 12 * 1024 - 512;
+
+/** O tamanho em bytes UTF-8 do que vai à ponte: a mesma conta do prelúdio. */
+function bytesNaPonte(valor) {
+  const texto = JSON.stringify(valor);
+  let bytes = 0;
+  for (let i = 0; i < texto.length; i += 1) {
+    const unidade = texto.charCodeAt(i);
+    if (unidade < 0x80) bytes += 1;
+    else if (unidade < 0x800) bytes += 2;
+    else if (unidade >= 0xd800 && unidade <= 0xdbff) { bytes += 4; i += 1; }
+    else bytes += 3;
+  }
+  return bytes;
+}
+
+/** Nada cortado: listas inteiras, textos inteiros, a cena com tudo. */
+const SEM_CORTE = Object.freeze({ lista: Infinity, texto: Infinity, rotulos: true, grade: true });
+/**
+ * O que esta montagem cortou para caber. `caber` o aperta, um passo de cada
+ * vez, e o devolve a `SEM_CORTE` no fim: fora de uma montagem nada é cortado.
+ */
+let corte = SEM_CORTE;
+/**
+ * Os passos, do que menos se sente ao que mais se sente. **Campo editável
+ * nunca é cortado**: um texto encurtado num campo voltaria ao servidor
+ * encurtado na próxima gravação.
+ */
+const PASSOS_DO_CORTE = [
+  { lista: 24 }, { texto: 400 }, { lista: 12 }, { rotulos: false },
+  { texto: 160 }, { lista: 6 }, { grade: false }, { lista: 3, texto: 80 },
+];
+
+/**
+ * Monta a árvore que cabe, ou diz por que não coube.
+ *
+ * @param {() => any} montar Quem constrói a árvore, lendo `corte`.
+ * @param {(bytes: number) => any} quandoNaoCabe A árvore que explica, com o
+ *   tamanho da que não coube.
+ */
+function caber(montar, quandoNaoCabe) {
+  try {
+    corte = SEM_CORTE;
+    let arvore = montar();
+    for (const passo of PASSOS_DO_CORTE) {
+      if (bytesNaPonte(arvore) <= TETO_DA_MONTAGEM) return arvore;
+      corte = { ...corte, ...passo };
+      arvore = montar();
+    }
+    const bytes = bytesNaPonte(arvore);
+    if (bytes <= TETO_DA_MONTAGEM) return arvore;
+    corte = SEM_CORTE;
+    return quandoNaoCabe(bytes);
+  } finally {
+    corte = SEM_CORTE;
+  }
+}
+
+/** Os primeiros itens de uma lista, quantos o corte deixa. */
+const oQueCabe = itens => itens.slice(0, corte.lista);
+/** A frase do que ficou de fora de uma lista, quando ficou alguma coisa. */
+const oQueFicouDeFora = (itens, oQue) => {
+  const fora = itens.length - Math.min(itens.length, corte.lista);
+  return fora > 0
+    ? [caixa(['+' + fora + ' ' + oQue + ' não cabem nesta tela: uma montagem do SEELE leva até 12 KiB.'],
+      { corpo: 11, opacidade: 0.7 })]
+    : [];
+};
+/** Um texto de leitura, encurtado pelo corte. Nunca o valor de um campo. */
+const resumir = texto => {
+  const t = String(texto ?? '');
+  return t.length > corte.texto ? t.slice(0, corte.texto) + '…' : t;
+};
 
 const nomeDe = id => {
   const pessoa = ultimo?.presentes?.find(p => String(p.id) === String(id));
@@ -468,8 +661,9 @@ const ondeEsta = peca =>
  * que se pega.
  */
 function tabuleiro(cena) {
-  const largura = Math.min(cena.cols * CELULA, LADO_MAXIMO);
-  const altura = Math.min(cena.rows * CELULA, LADO_MAXIMO);
+  const lado = ladoDaCasa(cena);
+  const largura = cena.cols * lado;
+  const altura = cena.rows * lado;
   const figuras = [];
   // **O mapa é o fundo desta tela, e não uma imagem ao lado dela.**
   //
@@ -488,35 +682,58 @@ function tabuleiro(cena) {
     : null;
 
   // A grade. Linhas não são pegas — elas são régua, e pegá-las roubaria o toque
-  // de toda peça em cima delas.
-  for (let c = 0; c <= cena.cols; c += 1) {
-    figuras.push({ tipo: 'linha', x: c * CELULA, y: 0, ate_x: c * CELULA, ate_y: altura, cor: '#241f19' });
+  // de toda peça em cima delas. É a primeira coisa a sair quando a cena não
+  // cabe numa montagem (`corte.grade`), e a cena diz que saiu.
+  if (corte.grade) {
+    for (let c = 0; c <= cena.cols; c += 1) {
+      figuras.push({ tipo: 'linha', x: c * lado, y: 0, ate_x: c * lado, ate_y: altura, cor: '#241f19' });
+    }
+    for (let l = 0; l <= cena.rows; l += 1) {
+      figuras.push({ tipo: 'linha', x: 0, y: l * lado, ate_x: largura, ate_y: l * lado, cor: '#241f19' });
+    }
   }
-  for (let l = 0; l <= cena.rows; l += 1) {
-    figuras.push({ tipo: 'linha', x: 0, y: l * CELULA, ate_x: largura, ate_y: l * CELULA, cor: '#241f19' });
-  }
-  for (const parede of cena.walls ?? []) {
+  // **Um muro é uma figura, e não trinta.** As paredes vizinhas de uma linha
+  // viram um retângulo só: o mesmo desenho, e uma fração dos bytes de uma
+  // montagem que tem teto.
+  for (const muro of muros(cena.walls ?? [])) {
     figuras.push({
-      tipo: 'retangulo', x: parede.x * CELULA, y: parede.y * CELULA,
-      largura: CELULA, altura: CELULA, cor: '#3a322a',
+      tipo: 'retangulo', x: muro.x * lado, y: muro.y * lado,
+      largura: muro.casas * lado, altura: lado, cor: '#3a322a',
     });
   }
   for (const peca of cena.tokens ?? []) {
     const { x, y } = ondeEsta(peca);
     figuras.push({
       tipo: 'circulo', chave: 'peca:' + peca.id,
-      x: x * CELULA + CELULA / 2, y: y * CELULA + CELULA / 2,
-      raio: CELULA / 2 - 3, cor: peca.hidden ? '#908574' : '#f2521f',
+      x: x * lado + lado / 2, y: y * lado + lado / 2,
+      raio: lado / 2 - 3, cor: peca.hidden ? '#908574' : '#f2521f',
     });
-    figuras.push({
-      tipo: 'texto', x: x * CELULA + 2, y: y * CELULA + CELULA - 10,
-      dentro: (peca.name || '').slice(0, 6), corpo: 9, cor: '#eae3cf',
-    });
+    if (corte.rotulos) {
+      figuras.push({
+        tipo: 'texto', x: x * lado + 2, y: y * lado + lado - 10,
+        dentro: (peca.name || '').slice(0, 6), corpo: 9, cor: '#eae3cf',
+      });
+    }
   }
   return {
     forma: 'tela', chave: 'tabuleiro', largura, altura, figuras,
     ...(fundo ? { fundo } : {}),
   };
+}
+
+/** As paredes vizinhas de cada linha, juntas: `{ x, y, casas }`. */
+function muros(paredes) {
+  const ordenadas = [...paredes].sort((a, b) => a.y - b.y || a.x - b.x);
+  const juntos = [];
+  for (const parede of ordenadas) {
+    const anterior = juntos.at(-1);
+    if (anterior && anterior.y === parede.y && anterior.x + anterior.casas === parede.x) {
+      anterior.casas += 1;
+    } else {
+      juntos.push({ x: parede.x, y: parede.y, casas: 1 });
+    }
+  }
+  return juntos;
 }
 
 function estadoVazio(titulo, orientacao) {
@@ -544,6 +761,11 @@ function oTabuleiro(campanha) {
     // A imagem da cena vem da metade de servidor deste MOD e entra **dentro**
     // da tela, sob as peças. Ver `tabuleiro`.
     partes.push(tabuleiro(cena));
+    if (!corte.grade || !corte.rotulos) {
+      partes.push(caixa([(!corte.grade ? 'A grade e os nomes das peças saíram' : 'Os nomes das peças saíram')
+        + ' para esta cena caber numa tela do SEELE, que leva até 12 KiB por montagem.'],
+      { corpo: 11, opacidade: 0.7 }));
+    }
   } else if (cena.asset) {
     // Uma ilustração não é tabuleiro: ela não tem grade nem peça, e por isso
     // continua sendo mídia — só que no lugar dela, e não ao lado de um mapa.
@@ -552,8 +774,12 @@ function oTabuleiro(campanha) {
       descricao: 'Ilustração de ' + cena.name,
     }));
   }
-  if (cena.description) partes.push(texto(cena.description));
-  if (ultimo.isGM && cena.notes) partes.push(texto('Notas do GM: ' + cena.notes));
+  // Com o ajuste aberto, a descrição e as notas já estão nos campos dele:
+  // repeti-las aqui dobrava os bytes da aba para dizer a mesma coisa.
+  if (!ajustandoCena) {
+    if (cena.description) partes.push(texto(resumir(cena.description)));
+    if (ultimo.isGM && cena.notes) partes.push(texto('Notas do GM: ' + resumir(cena.notes)));
+  }
   return partes;
 }
 
@@ -620,8 +846,8 @@ function osControles(campanha, secao = 'tudo') {
 function aFichaAberta(campanha) {
   const ficha = campanha.sheets.find(s => s.id === fichaAberta);
   if (!ficha) return [];
-  const edit = fichaEmEdicao ?? ficha;
-  const mudou = fichaEmEdicao !== null && JSON.stringify(fichaEmEdicao) !== JSON.stringify(ficha);
+  const edit = fichaMesclada(ficha);
+  const mudou = fichaEmEdicao !== null && JSON.stringify(fichaEmEdicao) !== JSON.stringify(baseDaFicha);
   const partes = [
     cabecalho('FICHA · ' + ficha.name),
     texto('PV ' + ficha.hp + '/' + ficha.maxHp + ' · CA ' + ficha.ac),
@@ -632,9 +858,12 @@ function aFichaAberta(campanha) {
     ]),
     linha([
       botao('condicao-atordoado', ficha.conditions?.includes('stunned') ? 'TIRAR ATORDOADO' : 'ATORDOAR'),
-      botao('iniciativa-add', 'PÔR NA INICIATIVA'),
+      // A iniciativa é do mestre (`initiative-add` é `gm-only`): oferecê-la a
+      // quem joga era um botão que só servia para ser recusado.
+      ...(ultimo.isGM ? [botao('iniciativa-add', 'PÔR NA INICIATIVA')] : []),
       botao('fechar-ficha', 'FECHAR'),
     ]),
+    ...aFichaNaMesa(campanha, ficha),
   ];
   if (ficha.portrait) {
     partes.push({
@@ -691,13 +920,18 @@ function aFichaAberta(campanha) {
   // botão que gasta um espaço ao conjurar.
   partes.push(cabecalho('MAGIAS PREPARADAS'));
   const preparadas = new Set(edit.spells ?? []);
-  for (const entrada of campanha.entries) {
+  // As preparadas primeiro: se a lista for cortada para caber, o que sai é o
+  // que esta ficha não leva.
+  const magias = [...campanha.entries].sort((a, b) =>
+    Number(preparadas.has(b.id)) - Number(preparadas.has(a.id)));
+  for (const entrada of oQueCabe(magias)) {
     partes.push(linha([
       texto(entrada.name + ' · nível ' + entrada.level),
       botao('magia-' + entrada.id, preparadas.has(entrada.id) ? 'TIRAR' : 'PREPARAR'),
       ...(preparadas.has(entrada.id) ? [botao('conjurar-' + entrada.id, 'CONJURAR')] : []),
     ]));
   }
+  partes.push(...oQueFicouDeFora(magias, 'verbetes'));
   if (!campanha.entries.length) partes.push(texto('O compêndio está vazio.'));
 
   // **Ações**: o que a ficha faz, com fórmula, usos e recuperação.
@@ -726,18 +960,47 @@ function aFichaAberta(campanha) {
   return partes;
 }
 
-/** O compêndio, editável: criar, mudar e publicar um verbete. */
+/**
+ * De quem é a ficha, e a peça dela na cena: os dois controles do mestre.
+ *
+ * O servidor sempre soube entregar uma ficha (`sheet-owner`) e pôr na mesa a
+ * peça de uma ficha (`token-add` com `sheet`), e só deixa quem joga mover a
+ * peça da própria ficha. Este cliente nunca mandou nenhum dos dois: toda
+ * ficha nascia do mestre e toda peça nascia sem ficha, e quem jogava não
+ * tinha ficha para abrir nem peça para mover — com o vazio da aba dizendo
+ * «peça a quem mestra para atribuir uma a você», a um mestre sem como.
+ */
+function aFichaNaMesa(campanha, ficha) {
+  if (!ultimo.isGM) return [];
+  const pessoas = pessoasComoOpcoes();
+  // Quem é dono e não está conectado continua sendo uma opção: sumir com ele
+  // da lista faria a escolha mostrar outra pessoa como dona.
+  if (!pessoas.some(p => p.valor === String(ficha.owner))) {
+    pessoas.push({ valor: String(ficha.owner), dentro: nomeDe(ficha.owner) });
+  }
+  const cena = cenaAtiva(campanha);
+  const jaEsta = (cena?.tokens ?? []).some(t => t.sheet === ficha.id);
+  return [linha([
+    escolha('dono', 'DONO DA FICHA', String(ficha.owner), pessoas),
+    ...(cena?.kind === 'map'
+      ? [botao('por-na-mesa', jaEsta ? 'A PEÇA ESTÁ NA MESA' : 'PÔR A PEÇA NA MESA', jaEsta)]
+      : []),
+  ])];
+}
+
+/**
+ * O compêndio, editável: criar e mudar um verbete.
+ *
+ * EDITAR e PUBLICAR moram no cartão de cada verbete (`osVerbetes`). Esta
+ * função listava os verbetes de novo, uma linha por verbete com os dois
+ * botões, acima dos cartões: quem mestra via cada verbete duas vezes, e a aba
+ * pagava os dois numa montagem que tem teto.
+ */
 function oCompendio(campanha) {
   if (!ultimo.isGM) return [];
   const e = verbeteEmEdicao;
   return [
     cabecalho('COMPÊNDIO'),
-    ...campanha.entries.map(entrada => linha([
-      texto(entrada.name + ' · ' + entrada.kind + ' · nível ' + entrada.level
-        + (entrada.published ? ' · publicado' : ' · só o GM vê')),
-      botao('editar-verbete-' + entrada.id, 'EDITAR'),
-      botao('publicar-verbete-' + entrada.id, entrada.published ? 'RECOLHER' : 'PUBLICAR'),
-    ])),
     linha([
       campo('v-name', 'VERBETE', e?.name ?? ''),
       campo('v-kind', 'TIPO', e?.kind ?? 'nota'),
@@ -759,6 +1022,7 @@ function oCompendio(campanha) {
 function aCenaEmAjuste(campanha) {
   const cena = cenaAtiva(campanha);
   if (!cena || !ultimo.isGM) return [];
+  if (!ajustandoCena) return [acoes([botao('ajustar-cena', 'AJUSTAR CENA')])];
   const c = cenaEmEdicao ?? cena;
   const mudou = cenaEmEdicao !== null;
   return [
@@ -773,6 +1037,7 @@ function aCenaEmAjuste(campanha) {
     linha([
       botao('gravar-cena', mudou ? 'GRAVAR CENA' : 'GRAVADA', !mudou),
       botao('descartar-cena', 'DESCARTAR', !mudou),
+      botao('ajustar-cena', 'FECHAR AJUSTE'),
     ]),
   ];
 }
@@ -841,13 +1106,31 @@ function oResto(campanha) {
  * outros três. As abas os separam sem escondê-los, e **só a aberta é montada**:
  * um tabuleiro com sessenta peças não é desenhado enquanto alguém lê o
  * compêndio.
+ *
+ * Este comentário dizia isso desde a página nascer, e o código montava as
+ * cinco abas inteiras em toda montagem — que tem teto de 12 KiB. As fechadas
+ * vão agora sem conteúdo: o rótulo basta para a pessoa trocar, e trocar
+ * remonta (`evento.nome === 'aba'`).
+ *
+ * @param {number | null} [naoCoube] Os bytes da aba aberta quando nem cortada
+ *   ela coube numa montagem; a aba diz isso no lugar do conteúdo.
  */
-function aPaginaDaMesa() {
+function aPaginaDaMesa(naoCoube = null) {
   if (!ultimo) return [texto('Consultando a campanha deste canal…')];
   const campanha = ultimo.campaign;
   if (!campanha) return oConvite();
 
-  const cena = cenaAtiva(campanha);
+  const conteudo = (qual, montar) => {
+    if (qual !== abaAberta) return [];
+    if (naoCoube === null) return montar();
+    return [estadoVazio('Esta aba não coube numa tela do SEELE',
+      'Ela tem ' + naoCoube + ' bytes mesmo cortada, e uma montagem leva até 12.288. '
+      + 'O que mais pesa são os textos longos de uma ficha ou de uma cena abertas: '
+      + 'feche-as ou encurte-as.'),
+    ...(ultimo.isGM && qual === 'tabuleiro' && ajustandoCena
+      ? [acoes([botao('ajustar-cena', 'FECHAR AJUSTE')])] : []),
+    ...(qual === 'fichas' && fichaAberta ? [acoes([botao('fechar-ficha', 'FECHAR A FICHA')])] : [])];
+  };
   return [
     // **O nome da campanha não se repete.** Ele é o título da página, que o
     // produto monta na cartela do cabeçalho — `abrirMesa` o entrega. Escrevê-lo
@@ -863,26 +1146,26 @@ function aPaginaDaMesa() {
         + ' · Mestre ' + nomeDe(campanha.gm)], { corpo: 11, opacidade: 0.7, crescer: 1 }),
     ], { direcao: 'linha', alinhar: 'centro', intervalo: 10, quebra: 'sim' }),
 
-    ...aTrilhaQueToca(campanha, cena),
+    ...aTrilhaQueToca(campanha),
 
     abas('aba', abaAberta, [
-      aba('tabuleiro', 'TABULEIRO', [
+      aba('tabuleiro', 'TABULEIRO', conteudo('tabuleiro', () => [
         ...oTabuleiro(campanha),
         ...osControles(campanha, 'tabuleiro'),
         ...aCenaEmAjuste(campanha),
-      ]),
-      aba('fichas', 'FICHAS', [
+      ])),
+      aba('fichas', 'FICHAS', conteudo('fichas', () => [
         ...osControles(campanha, 'fichas'),
         ...aFichaAberta(campanha),
         ...asFichas(campanha),
-      ]),
-      aba('compendio', 'COMPÊNDIO', [
+      ])),
+      aba('compendio', 'COMPÊNDIO', conteudo('compendio', () => [
         ...osControles(campanha, 'compendio'),
         ...oCompendio(campanha),
         ...osVerbetes(campanha),
-      ]),
-      aba('iniciativa', 'INICIATIVA', aIniciativa(campanha)),
-      aba('registro', 'REGISTRO', oRegistro(campanha)),
+      ])),
+      aba('iniciativa', 'INICIATIVA', conteudo('iniciativa', () => aIniciativa(campanha))),
+      aba('registro', 'REGISTRO', conteudo('registro', () => oRegistro(campanha))),
     ]),
   ];
 }
@@ -898,25 +1181,30 @@ function aPaginaDaMesa() {
  * a única origem de som que a API oferece além do servidor do MOD, e a que faz
  * sentido para ambientação, que é a mesma para todo mundo.
  *
+ * **O que toca é `music`, e só ela.** O servidor aplica a trilha da cena ao
+ * mostrá-la (e ao mudá-la com ela na mesa) e guarda o resultado ali. Este lado
+ * refazia a conta pela cena e discordava dele: com a cena em silêncio, a
+ * trilha que o mestre escolhia para a mesa nunca tocava, e a mesa dizia
+ * «Trilha escolhida: silence. Este pacote não traz o som dela.»
+ *
  * `position` e `startedAt` do servidor ficam de fora de propósito: o §8 do
  * plano é explícito em não prometer sincronismo perfeito, e uma trilha que
  * finge estar alinhada é pior que uma que toca do começo.
  */
-function aTrilhaQueToca(campanha, cena) {
-  const daCena = cena?.ambience && cena.ambience !== 'inherit' ? cena.ambience : null;
-  const preset = daCena ?? campanha.music?.preset ?? null;
-  const arquivoDaTrilha = preset ? TRILHAS_EM_ARQUIVO[preset] : null;
-  if (!preset || !arquivoDaTrilha) {
-    return preset
-      ? [caixa(['Trilha escolhida: ' + preset + '. Este pacote não traz o som dela.'],
-        { corpo: 11, opacidade: 0.7 })]
-      : [];
+function aTrilhaQueToca(campanha) {
+  const preset = campanha.music?.preset ?? null;
+  if (!preset) return [];
+  const nome = TRILHAS.find(t => t.valor === preset)?.dentro ?? preset;
+  const arquivoDaTrilha = TRILHAS_EM_ARQUIVO[preset];
+  if (!arquivoDaTrilha) {
+    return [caixa(['Trilha escolhida: ' + nome + '. Este pacote não traz o som dela.'],
+      { corpo: 11, opacidade: 0.7 })];
   }
   return [caixa([
     caixa(['TRILHA'], { corpo: 10, peso: 'forte', opacidade: 0.7 }),
     midia('trilha:' + preset, {
       fonte: arquivoDaTrilha,
-      descricao: 'Ambientação: ' + preset,
+      descricao: 'Ambientação: ' + nome.toLowerCase(),
       tocando: campanha.music?.playing === true,
     }),
   ], { intervalo: 6 })];
@@ -980,7 +1268,7 @@ function asFichas(campanha) {
       : 'Você ainda não tem uma ficha disponível. Peça a quem mestra para atribuir uma a você.'));
     return partes;
   }
-  partes.push(grade(campanha.sheets.map(ficha => caixa([
+  partes.push(grade(oQueCabe(campanha.sheets).map(ficha => caixa([
     caixa([
       caixa([ficha.name], { peso: 'forte', corpo: 14, crescer: 1 }),
       botao('abrir-ficha-' + ficha.id, fichaAberta === ficha.id ? 'ABERTA' : 'ABRIR',
@@ -1005,32 +1293,38 @@ function asFichas(campanha) {
     borda: { largura: 1, cor: '#3a322a' },
     raio: 0,
   })), { colunas: 2, intervalo: 12 }, { classe: 'fichas' }));
+  partes.push(...oQueFicouDeFora(campanha.sheets, 'fichas'));
   return partes;
 }
 
 /** Os verbetes do compêndio, um por caixa. */
 function osVerbetes(campanha) {
   if (!campanha.entries.length) return [estadoVazio('Compêndio vazio', ultimo.isGM ? 'Adicione um verbete acima para organizar o mundo da campanha.' : 'Os verbetes publicados por quem mestra aparecerão aqui.')];
-  return [pilha(campanha.entries.map(entrada => caixa([
+  return [pilha(oQueCabe(campanha.entries).map(entrada => caixa([
     caixa([
       caixa([entrada.name], { peso: 'forte', corpo: 13, crescer: 1 }),
       distintivo([entrada.kind + (entrada.level ? ' · nível ' + entrada.level : '')]),
       ...(entrada.published ? [] : [distintivo(['NÃO PUBLICADO'],
         { borda: { largura: 1, cor: '#f2521f' }, cor: '#f2521f' })]),
     ], { direcao: 'linha', alinhar: 'centro', intervalo: 8, quebra: 'sim' }),
-    ...(entrada.description ? [caixa([entrada.description], { corpo: 12, entrelinha: 1.5 })] : []),
+    ...(entrada.description ? [caixa([resumir(entrada.description)], { corpo: 12, entrelinha: 1.5 })] : []),
+    ...(ultimo.isGM ? [acoes([
+      botao('editar-verbete-' + entrada.id, 'EDITAR'),
+      botao('publicar-verbete-' + entrada.id, entrada.published ? 'RECOLHER' : 'PUBLICAR'),
+    ])] : []),
   ], {
     intervalo: 6,
     preenchimento: 10,
     borda: { largura: 1, cor: '#3a322a' },
     raio: 0,
-  })), { intervalo: 10 })];
+  })), { intervalo: 10 }), ...oQueFicouDeFora(campanha.entries, 'verbetes')];
 }
 
 /** O que aconteceu, do mais recente para o mais antigo. */
 function oRegistro(campanha) {
   if (!campanha.log.length) return [estadoVazio('O registro está vazio', 'Role um dado no Tabuleiro. Os resultados e acontecimentos da campanha ficam aqui.')];
-  return [pilha(campanha.log.slice(-40).reverse().map(l => caixa([
+  const recentes = campanha.log.slice(-40).reverse();
+  return [pilha(oQueCabe(recentes).map(l => caixa([
     caixa([nomeDe(l.person)], { corpo: 10, opacidade: 0.7 }),
     caixa([l.text], { corpo: 12 }),
   ], {
@@ -1038,7 +1332,7 @@ function oRegistro(campanha) {
     preenchimento: 8,
     borda: { largura: 1, cor: '#241f19' },
     raio: 0,
-  })), { intervalo: 6 })];
+  })), { intervalo: 6 }), ...oQueFicouDeFora(recentes, 'acontecimentos mais antigos')];
 }
 
 /**
@@ -1051,7 +1345,7 @@ function aIniciativa(campanha) {
   if (!campanha.initiative.length) {
     return [
       estadoVazio('A iniciativa ainda não começou', ultimo.isGM
-        ? 'Abra uma ficha e use ENTRAR NA INICIATIVA.'
+        ? 'Abra uma ficha e use PÔR NA INICIATIVA.'
         : 'Quem mestra define a ordem dos turnos. Ela aparecerá aqui.'),
     ];
   }
@@ -1129,12 +1423,15 @@ function aRegiao() {
 
 // ------------------------------------------------------ abrir e repintar
 
+/** A página da mesa, cortada até caber numa montagem. Ver `caber`. */
+const aPaginaQueCabe = () => caber(() => aPaginaDaMesa(), bytes => aPaginaDaMesa(bytes));
+
 async function abrirMesa() {
   if (!temSuperficies) return;
   telas.mesa ??= await pagina('mesa', 'Mesa', { imersiva: true });
   await telas.mesa.classes(CLASSES_DA_MESA);
   await telas.mesa.titulo(ultimo?.campaign?.name || 'Mesa');
-  await telas.mesa.montar(aPaginaDaMesa());
+  await telas.mesa.montar(aPaginaQueCabe());
   await telas.mesa.mostrar();
 }
 
@@ -1159,7 +1456,7 @@ const repintarTelas = agruparAtualizacoes(async () => {
   const mesa = telas.mesa;
   if (mesa) {
     await mesa.titulo(ultimo?.campaign?.name || 'Mesa');
-    await mesa.montar(aPaginaDaMesa());
+    await mesa.montar(aPaginaQueCabe());
   }
   const criar = telas.criar;
   if (criar) {
@@ -1262,14 +1559,15 @@ async function enviarImagem(canal, escolhido, montarPedido) {
       await SeeleUI.soltar(escolhido.id);
     } catch (erro) {
       // Uma falha ao devolver não pode substituir a falha que a trouxe: quem
-      // está esperando o erro do envio precisa do erro do envio.
-      console.error('MESA: o arquivo não foi devolvido: ' + (erro.message || erro));
+      // está esperando o erro do envio precisa do erro do envio — e é por isso
+      // que a linha passa por `anotar`, que não lança onde não há `console`.
+      anotar('MESA: o arquivo não foi devolvido: ' + (erro.message || erro));
     }
   }
 }
 
 /** Da tela para a grade, e dentro dos limites da cena. */
-const naGrade = (valor, teto) => Math.max(0, Math.min(teto - 1, Math.floor(valor / CELULA)));
+const naGrade = (valor, teto, lado) => Math.max(0, Math.min(teto - 1, Math.floor(valor / lado)));
 
 /**
  * O contador que dá nome a cada tentativa lógica de escrita.
@@ -1311,19 +1609,46 @@ const proximaMarca = () => 'e-' + marcaDaExecucao + '-' + (++serieDeEscrita);
  * lado recebeu; `setup` não a manda porque não há campanha de que tirá-la, e o
  * servidor não a exige nesse caso.
  *
+ * # A recusa por conflito, e por que ela é repetida uma vez
+ *
+ * A revisão é da campanha inteira, e `ultimo` é renovado pela consulta de
+ * dois segundos. Qualquer escrita de outra pessoa nesse intervalo — uma
+ * rolagem — fazia o comando seguinte daqui voltar `conflict`, e a palavra
+ * aparecia crua na mesa. Um envio de mapa de dez megabytes são dois mil
+ * fragmentos, e parava no primeiro dado rolado por alguém.
+ *
+ * Numa recusa por `conflict` nada foi aplicado e nenhum recibo foi guardado:
+ * este lado consulta de novo e repete **uma vez**, com a mesma marca. O
+ * pedido pode ser uma função, e então ele é refeito sobre a projeção nova —
+ * é o que faz a gravação da ficha ir sobre a ficha que acabou de chegar. A
+ * segunda recusa é dita.
+ *
  * @param {number} canal O canal desta campanha.
- * @param {object} pedido O que a operação diz — **sem** `nonce` e `revision`.
+ * @param {object | (() => object)} pedido O que a operação diz — **sem**
+ *   `nonce` e `revision` —, ou quem o monta a partir de `ultimo`.
  * @param {string} [marca] A marca de uma tentativa anterior, para repeti-la.
  */
-function escrever(canal, pedido, marca = proximaMarca()) {
-  const campanha = ultimo?.campaign;
-  const completo = { ...pedido, nonce: marca };
-  // `setup` cria; as outras exigem concordar com a revisão que está lá.
-  if (pedido.op !== 'setup' && campanha) completo.revision = campanha.revision;
-  return request(canal, completo).then(resposta => {
-    if (resposta.campaign) ultimo = { ...ultimo, ...resposta };
-    return resposta;
-  });
+async function escrever(canal, pedido, marca = proximaMarca()) {
+  const montar = typeof pedido === 'function' ? pedido : () => pedido;
+  const tentar = () => {
+    const corpo = montar();
+    const completo = { ...corpo, nonce: marca };
+    // `setup` cria; as outras exigem concordar com a revisão que está lá.
+    const campanha = ultimo?.campaign;
+    if (corpo.op !== 'setup' && campanha) completo.revision = campanha.revision;
+    return request(canal, completo);
+  };
+  let resposta;
+  try {
+    resposta = await tentar();
+  } catch (erro) {
+    if (erro?.message !== 'conflict') throw erro;
+    const agora = await request(canal, { op: 'view' });
+    if (ultimo?.canal === canal && agora.campaign) ultimo = { ...ultimo, ...agora };
+    resposta = await tentar();
+  }
+  if (resposta.campaign) ultimo = { ...ultimo, ...resposta };
+  return resposta;
 }
 
 /**
@@ -1349,10 +1674,11 @@ let canalDaEdicao = null;
 /** Esquece o que estava sendo editado, porque ele era de outro canal. */
 function largarAEdicao() {
   fichaAberta = null;
-  fichaEmEdicao = null;
+  largarRascunhoDaFicha();
   acaoEmEdicao = null;
   verbeteEmEdicao = null;
   cenaEmEdicao = null;
+  ajustandoCena = false;
   arrastando = null;
   modoParede = false;
   abaAberta = 'tabuleiro';
@@ -1378,7 +1704,15 @@ iniciar(
         await entrada('Mesa', 'abrir-mesa');
         entradaRegistrada = true;
       } catch (erro) {
-        console.warn('MESA: a entrada foi recusada: ' + (erro.message || erro));
+        // **A porta recusada é dita a quem usa.** A entrada é o único jeito de
+        // abrir a mesa; o `console.warn` que havia aqui ia só ao registro (e
+        // antes da 0.15.1, sem `console` na metade de janela, lançava). A recusa é
+        // dita uma vez por motivo, e a próxima consulta tenta de novo.
+        const motivo = erro?.message || String(erro);
+        if (motivo !== recusaDaEntradaDita) {
+          recusaDaEntradaDita = motivo;
+          await avisar('A entrada Mesa foi recusada pelo SEELE: ' + motivo, 'erro');
+        }
       }
     }
     await repintarTelas();
@@ -1461,7 +1795,7 @@ iniciar(
         // O rascunho da ficha nasce do que o servidor tem, e daí em diante é
         // dele: sem isso a consulta de dois segundos apagaria o que está sendo
         // digitado, e o foco ficaria numa caixa cujo valor este MOD trocou.
-        fichaEmEdicao = JSON.parse(JSON.stringify(fichaEmEdicao ?? ficha));
+        rascunharFicha(ficha);
         if (evento.chave.startsWith('a-')) {
           fichaEmEdicao.abilities = { ...fichaEmEdicao.abilities };
           fichaEmEdicao.abilities[evento.chave.slice(2)] = Number(evento.valor) || 0;
@@ -1498,7 +1832,7 @@ iniciar(
       }
       if (evento.chave.startsWith('s-') && ficha) {
         // Os espaços de magia entram no mesmo rascunho da ficha: eles são dela.
-        fichaEmEdicao = JSON.parse(JSON.stringify(fichaEmEdicao ?? ficha));
+        rascunharFicha(ficha);
         const nivel = Number(evento.chave.slice(2));
         fichaEmEdicao.slots = (fichaEmEdicao.slots ?? []).map((s, i) =>
           i === nivel ? { ...s, max: Number(evento.valor) || 0 } : s);
@@ -1518,8 +1852,8 @@ iniciar(
 
     if (evento.nome === 'traco') {
       if (!cena || cena.kind !== 'map') return null;
-      const x = naGrade(evento.x, cena.cols);
-      const y = naGrade(evento.y, cena.rows);
+      const x = naGrade(evento.x, cena.cols, ladoDaCasa(cena));
+      const y = naGrade(evento.y, cena.rows, ladoDaCasa(cena));
       if (modoParede) {
         // No modo parede o `alvo` não importa: o que vale é a casa, e pintar
         // sobre uma peça é exatamente o que quem pinta uma parede quer.
@@ -1573,6 +1907,12 @@ iniciar(
       acaoEmEdicao[evento.chave.slice(3)] = evento.valor;
       redesenhar();
       return null;
+    }
+    if (evento.nome === 'escolha' && evento.chave === 'dono' && fichaAberta) {
+      return escrever(canal, { op: 'sheet-owner', id: fichaAberta, owner: evento.valor }).then(
+        () => redesenhar(),
+        erro => { aviso = erro.message || String(erro); redesenhar(); },
+      );
     }
     if (evento.nome === 'escolha' && evento.chave === 'trilha-mesa') {
       return escrever(canal, { op: 'music', command: 'select', preset: evento.valor }).then(
@@ -1629,7 +1969,7 @@ iniciar(
         ? evento.chave.slice(prefixo.length) : null;
       const magia = daFicha('magia-');
       if (magia) {
-        fichaEmEdicao = JSON.parse(JSON.stringify(fichaEmEdicao ?? ficha));
+        rascunharFicha(ficha);
         const tinha = (fichaEmEdicao.spells ?? []).includes(magia);
         fichaEmEdicao.spells = tinha
           ? fichaEmEdicao.spells.filter(s => s !== magia)
@@ -1733,18 +2073,33 @@ iniciar(
       );
     }
     if (campanha && evento.chave.startsWith('abrir-ficha-')) {
-      fichaAberta = evento.chave.slice('abrir-ficha-'.length);
+      const outra = evento.chave.slice('abrir-ficha-'.length);
+      // **O rascunho fica com a ficha dele.** Abrir outra mantinha o da
+      // anterior: a nota digitada numa aparecia na outra, sob o nome dela, e
+      // GRAVAR a escrevia lá. A ação em edição é da ficha também.
+      if (outra !== fichaAberta) {
+        largarRascunhoDaFicha();
+        acaoEmEdicao = null;
+      }
+      fichaAberta = outra;
+      // A ficha aberta mora na aba de fichas, e só a aba aberta é montada.
+      abaAberta = 'fichas';
       redesenhar();
       return null;
     }
     if (evento.chave === 'fechar-ficha') {
       fichaAberta = null;
-      fichaEmEdicao = null;
+      largarRascunhoDaFicha();
       redesenhar();
       return null;
     }
     if (evento.chave === 'descartar-ficha') {
-      fichaEmEdicao = null;
+      largarRascunhoDaFicha();
+      redesenhar();
+      return null;
+    }
+    if (evento.chave === 'ajustar-cena') {
+      ajustandoCena = !ajustandoCena;
       redesenhar();
       return null;
     }
@@ -1753,10 +2108,16 @@ iniciar(
       redesenhar();
       return null;
     }
-    if (evento.chave === 'gravar-ficha' && fichaEmEdicao) {
-      const enviada = fichaEmEdicao;
-      return escrever(canal, { op: 'sheet-save', sheet: enviada }).then(
-        () => { fichaEmEdicao = null; aviso = 'ficha gravada'; redesenhar(); },
+    if (evento.chave === 'gravar-ficha' && fichaEmEdicao && ficha) {
+      // **Recalculada a cada tentativa**: se o servidor recusar por conflito,
+      // a segunda vai sobre a ficha que a consulta acabou de trazer.
+      const id = ficha.id;
+      return escrever(canal, () => {
+        const agora = ultimo.campaign.sheets.find(s => s.id === id);
+        if (!agora) throw new Error('a ficha não está mais nesta mesa');
+        return { op: 'sheet-save', sheet: fichaMesclada(agora) };
+      }).then(
+        () => { largarRascunhoDaFicha(); aviso = 'ficha gravada'; redesenhar(); },
         erro => { aviso = erro.message || String(erro); redesenhar(); },
       );
     }
@@ -1777,17 +2138,25 @@ iniciar(
                   ? { op: 'entry-save', name: rascunho.entrada, kind: 'nota', level: 0 }
                 : evento.chave === 'criar-peca' && cena
                   ? { op: 'token-add', scene: cena.id, name: rascunho.peca, x: 0, y: 0 }
+                : evento.chave === 'por-na-mesa' && cena && ficha
+                  ? { op: 'token-add', scene: cena.id, sheet: ficha.id, x: 0, y: 0 }
                   : evento.chave === 'ferir' && ficha
                     ? { op: 'vitality', sheet: ficha.id, kind: 'damage', amount: quanto }
                     : evento.chave === 'curar' && ficha
                       ? { op: 'vitality', sheet: ficha.id, kind: 'heal', amount: quanto }
                       : evento.chave === 'condicao-atordoado' && ficha
-                        ? {
-                            op: 'conditions',
-                            sheet: ficha.id,
-                            conditions: ficha.conditions?.includes('stunned')
-                              ? ficha.conditions.filter(c => c !== 'stunned')
-                              : [...(ficha.conditions ?? []), 'stunned'],
+                        // Uma função, para a repetição depois de um conflito
+                        // partir das condições que acabaram de chegar.
+                        ? () => {
+                            const agora = ultimo.campaign.sheets.find(s => s.id === ficha.id) ?? ficha;
+                            const atuais = agora.conditions ?? [];
+                            return {
+                              op: 'conditions',
+                              sheet: ficha.id,
+                              conditions: atuais.includes('stunned')
+                                ? atuais.filter(c => c !== 'stunned')
+                                : [...atuais, 'stunned'],
+                            };
                           }
                         : evento.chave === 'iniciativa-add' && ficha
                           ? { op: 'initiative-add', name: ficha.name, value: 10 }

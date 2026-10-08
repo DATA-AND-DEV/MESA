@@ -77,8 +77,29 @@ function interfaceMod(id, titulo, intervalo = 4000) {
   const arquivo = (chave, dentro, extra) => ({ forma: 'arquivo', chave, dentro: String(dentro), ...extra });
   const midia = (chave, extra) => ({ forma: 'midia', chave, ...extra });
 
+  // **O canal aberto é o que o produto marca com `open`.** O `Snapshot` do
+  // SEELE não tem `open_channel` — cada canal de texto diz se é o que está
+  // sendo lido (`Channel.open`, em `crates/seele-ffi/src/types.rs`), e é assim
+  // que a lista de canais do próprio produto o encontra. Ler `open_channel`
+  // caía sempre em `channels[0]`: a campanha era a do primeiro canal, qualquer
+  // que fosse o aberto. O primeiro canal continua sendo a resposta quando
+  // nenhum está aberto, que é o instante entre entrar e o produto abrir um.
+  /**
+   * Uma linha no registro de quem roda o MOD, **se houver registro**.
+   *
+   * Chama o `console` só quando ele existe: o executor nativo dos apps
+   * anteriores à v0.15.1 não tem um (ele chegou nela, no commit `74fa771` do
+   * SEELE).
+   * Chamado sem conferir, ele lança — e, dentro de um `catch`, lança por cima
+   * da falha que estava sendo tratada. Os três MODs oficiais usam o mesmo.
+   */
+  const anotar = texto => {
+    if (typeof console !== 'undefined' && typeof console.error === 'function') console.error(texto);
+  };
+
   const canalDe = snapshot => {
-    const id = snapshot.open_channel ?? snapshot.channels?.[0]?.id;
+    const id = snapshot.channels?.find(c => c?.open === true)?.id
+      ?? snapshot.channels?.[0]?.id;
     return Number.isSafeInteger(id) && id > 0 ? id : null;
   };
 
@@ -293,7 +314,9 @@ function interfaceMod(id, titulo, intervalo = 4000) {
         }
       } catch (erro) {
         try { await recado('Não foi possível atualizar: ' + (erro.message || String(erro)), 'erro'); }
-        catch (falha) { console.error(titulo + ': ' + (falha.message || String(falha))); }
+        // Sem `console` (antes da 0.15.1), chamá-lo direto lançaria de dentro
+        // deste `catch`, e a volta acabaria numa promessa rejeitada.
+        catch (falha) { anotar(titulo + ': ' + (falha.message || String(falha))); }
       } finally {
         // Agenda depois de concluir: nunca sobrepõe consultas nem repete
         // escritas. O SEELE encerra o executor e seus temporizadores ao sair.
@@ -306,7 +329,7 @@ function interfaceMod(id, titulo, intervalo = 4000) {
   return {
     // API 3
     texto, cabecalho, lista, campo, escolha, botao, linha, arquivo, midia,
-    request, iniciar, desenhar, dizer, agruparAtualizacoes,
+    request, iniciar, desenhar, dizer, agruparAtualizacoes, anotar,
     // API 4 — composição
     caixa, pilha, grade, rolagem, separador, espaco,
     // API 4 — controle

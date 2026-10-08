@@ -1,7 +1,8 @@
-/* Mesa 1.2 — JavaScript source is the distributed artifact. No dependencies.
+/* MESA — server half. JavaScript source is the distributed artifact. No dependencies.
  * VINLAND informed the sheet structure and derived ability/proficiency model.
  * No book descriptions or third-party compendium were copied.
- * aoPedir is API v2. Never accept identity or permissions from the payload.
+ * aoPedir has kept the same contract since API v2. Never accept identity or
+ * permissions from the payload.
  */
 (() => {
   'use strict';
@@ -331,7 +332,10 @@
           case 'scene-music': {
             gm(c, ctx); const s = find(c.scenes, r.id);
             if (!['inherit', 'silence', ...Object.keys(ambience)].includes(r.preset)) fail('invalid-music');
-            s.ambience = r.preset; break;
+            s.ambience = r.preset;
+            // The scene on the table plays its ambience now, as scene-show would.
+            if (c.active === s.id && s.published && r.preset !== 'inherit') setMusic(c, r.preset);
+            break;
           }
           case 'scene-show': {
             gm(c, ctx); const s = find(c.scenes, r.id); s.published = true; c.active = r.id;

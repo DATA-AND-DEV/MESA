@@ -351,8 +351,12 @@ function responder(n,ok,carga){enviar({tipo:'resposta',n,ok,...carga});}
 async function atender(m){
   try{
     if(m.tipo==='snapshot'){
-      responder(m.n,true,{valor:{servidor,me:Number(pessoa),open_channel:Number($('canal').value),
-        channels:[{id:1,name:'geral'},{id:2,name:'outro'}],
+      // A forma do Snapshot do produto: o canal aberto é o que tem «open».
+      // «open_channel» não existe lá, e o laboratório que o inventava provava
+      // a troca de canal por um caminho que a janela não percorre.
+      const aberto=Number($('canal').value);
+      responder(m.n,true,{valor:{servidor,me:Number(pessoa),
+        channels:[{id:1,name:'geral',open:aberto===1},{id:2,name:'outro',open:aberto===2}],
         presentes:[{id:1,nickname:'Alex'},{id:2,nickname:'Lia'},{id:3,nickname:'Rafa'}]}});
       return;
     }
