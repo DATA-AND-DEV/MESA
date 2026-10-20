@@ -2,28 +2,24 @@
 //
 // # O que este laboratório prova, e o que ele não prova
 //
-// A versão anterior estava **obsoleta e não dizia**: ela procurava
-// `PRELUDIO_DO_MOD` dentro de `base.js`, que mudou de arquivo quando o ADR 0049
-// levou a execução para o QuickJS nativo; recortava `desenharARegiaoDoMod` por
-// índice de string, com uma assinatura que também mudou; e montava um `Worker`
-// de navegador, que é precisamente o ambiente que o ADR tirou. A auditoria de
-// 20/09/2026 encontrou os três, e observou que «corrigir o laboratório é parte
-// da entrega da API, pois é o que o criador de MOD usa para aprender».
+// É a API 6 do app 0.16, com as peças de verdade onde dá:
 //
-// O que ele passa a fazer:
-//
-// - **o prelúdio vem de onde ele mora agora**: `apps/seele-app/src/executor.rs`,
+// - **o prelúdio vem de onde ele mora**: `crates/seele-motor/src/preludio.rs`,
 //   recortado da constante `PRELUDIO`. Um prelúdio que não for encontrado é um
-//   erro com o caminho, e não um `undefined` que vira `Worker` sem API;
-// - **o código do MOD roda num contexto sem DOM e sem Node**, com a mesma
-//   fachada de mensagens que o executor oferece. Não é QuickJS — é o `vm` do
-//   Node, que tem `Promise`, `Map` e o resto do JavaScript moderno, como o
-//   QuickJS tem. Um MOD que dependesse de algo do V8 que o QuickJS não tem
-//   passaria aqui e falharia no produto, e é para isso que existe
-//   `ferramentas/quickjs-check`;
+//   erro com o caminho, e não um `undefined` que roda o MOD sem API;
+// - **as capacidades são as do contrato** (`api/v6.json`, a cópia conferida em
+//   `test/contrato/api-v6.json`): o `SeeleUI` nasce sem `regiao`, sem
+//   `snapshot` e sem `cartoes`, como no produto;
+// - **o código do MOD roda num contexto sem DOM e sem Node**, com a fachada de
+//   mensagens do executor (`seele.postar` e `seele.console`). Não é QuickJS — é
+//   o `vm` do Node —, e é para a diferença que existe `ferramentas/quickjs-check`;
 // - **o renderer é o do produto**, servido dos arquivos reais:
 //   `mods-estilos.js`, `mods-regiao.js`, `mods-superficies.js` e
-//   `mods-contribuicoes.js`, com as folhas deles. Não há cópia nem recorte.
+//   `mods-contribuicoes.js`, com as folhas deles;
+// - **a metade de servidor roda com o que a 6 dá a ela**: `mundo.avisar` (o
+//   aviso sai às janelas do mesmo servidor depois de o quintal gravar),
+//   `dados.uso()` e `dados.teto`, o `volume` e `contexto.sala`, pela presença
+//   que este laboratório simula.
 //
 // O que ele **não** prova: o executor real, os limites de memória e tempo dele,
 // a supervisão nativa, a revogação por geração e o descarte. Isso é o produto,
@@ -37,53 +33,44 @@ const root = process.env.MOD_PACKAGE || path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'mod.json')));
 const seele = process.env.SEELE_RAIZ || path.resolve(__dirname, '../../SEELE');
 const produto = process.env.SEELE_UI || path.join(seele, 'apps/seele-app/ui');
+const contrato = JSON.parse(fs.readFileSync(path.join(__dirname, '../test/contrato/api-v6.json'), 'utf8'));
 
 /** Lê um arquivo do produto, dizendo o caminho quando ele não está lá. */
 function doProduto(relativo) {
   const caminho = path.join(produto, relativo);
   if (!fs.existsSync(caminho)) {
     throw new Error(`O laboratório precisa de ${caminho}. `
-      + 'Aponte SEELE_UI para a pasta `apps/seele-app/ui` de um checkout do SEELE.');
+      + 'Aponte SEELE_UI para a pasta `apps/seele-app/ui` de um checkout do SEELE 0.16.');
   }
   return fs.readFileSync(caminho, 'utf8');
 }
 
 /**
- * O prelúdio, recortado de onde ele mora: o executor em Rust.
+ * O prelúdio, recortado de onde ele mora: o motor em Rust.
  *
  * Recortar texto de outro arquivo é frágil, e é de propósito que a falha seja
- * ruidosa: um prelúdio que mudou de forma tem de quebrar o laboratório, e não
- * virar um `undefined` que roda o MOD sem API nenhuma e o faz falhar por outro
- * motivo.
+ * ruidosa: um prelúdio que mudou de forma tem de quebrar o laboratório.
  */
-function preludioDoExecutor() {
-  const fonte = path.join(seele, 'apps/seele-app/src/executor.rs');
+function preludioDoMotor() {
+  const fonte = path.join(seele, 'crates/seele-motor/src/preludio.rs');
   if (!fs.existsSync(fonte)) {
     throw new Error(`O laboratório precisa de ${fonte}. `
-      + 'Aponte SEELE_RAIZ para um checkout do SEELE.');
+      + 'Aponte SEELE_RAIZ para um checkout do SEELE 0.16.');
   }
   const texto = fs.readFileSync(fonte, 'utf8');
-  const marca = 'const PRELUDIO: &str = r#"';
+  const marca = 'pub const PRELUDIO: &str = r#"';
   const inicio = texto.indexOf(marca);
   const fim = texto.indexOf('"#;', inicio);
   if (inicio < 0 || fim < 0) {
-    throw new Error('`PRELUDIO` não foi encontrado em executor.rs. '
+    throw new Error('`PRELUDIO` não foi encontrado em preludio.rs. '
       + 'Ele mudou de nome ou de forma, e este laboratório precisa acompanhar.');
   }
   return texto.slice(inicio + marca.length, fim);
 }
 
-const preludio = preludioDoExecutor();
-
-/** As capacidades que este manifesto declara — as mesmas do produto. */
-function capacidadesDaApi(api) {
-  if (api >= 4) {
-    return ['regiao', 'tema', 'cartoes', 'arquivo',
-      'superficies', 'contribuicoes', 'estilos', 'classes'];
-  }
-  if (api === 3) return ['regiao', 'tema', 'cartoes', 'arquivo'];
-  return [];
-}
+const preludio = preludioDoMotor();
+if (manifest.api !== 6) throw new Error('Este laboratório é da API 6, e o mod.json declara a ' + manifest.api + '.');
+const capacidades = contrato.compatibilidade['capacidades-por-versao']['6'];
 
 // ------------------------------------------------------- o mundo de mentira
 
@@ -91,31 +78,69 @@ const mundos = new Map();
 
 /** O estado de um servidor simulado, criado na primeira vez que alguém fala. */
 function mundoDe(chave) {
-  if (!mundos.has(chave)) mundos.set(chave, { data: {}, files: new Map() });
+  if (!mundos.has(chave)) {
+    mundos.set(chave, { data: {}, files: new Map(), volumes: new Map(), esperas: new Map(), salas: new Map() });
+  }
   return mundos.get(chave);
 }
 
-/** Uma volta ao servidor deste MOD, no `vm`, com o disco de mentira. */
-function aoPedir(chaveDoMundo, contexto, pedido) {
+const TETO_DO_QUINTAL = 256 * 1024;
+const bytesDe = d => Object.entries(d).reduce((n, [k, v]) => n + Buffer.byteLength(k) + Buffer.byteLength(String(v)), 0);
+
+/** Uma volta ao servidor deste MOD, no `vm`, com o disco e o volume de mentira. */
+function aoPedir(chaveDoMundo, pessoa, canal, pedido) {
   const mundo = mundoDe(chaveDoMundo);
   const dados = structuredClone(mundo.data);
-  const arquivos = mundo.files;
+  Object.defineProperty(dados, 'uso', { value: () => bytesDe(dados), enumerable: false });
+  Object.defineProperty(dados, 'teto', { value: TETO_DO_QUINTAL, enumerable: false });
+  const avisos = [];
   const ctx = vm.createContext({
     dados,
-    mundo: { agora: () => Math.floor(Date.now() / 1000) },
+    mundo: {
+      agora: () => Math.floor(Date.now() / 1000),
+      avisar: aviso => {
+        if (Buffer.byteLength(JSON.stringify(aviso?.carga ?? null)) > 1024) return { ok: false, erro: 'aviso-grande-demais' };
+        avisos.push(structuredClone(aviso));
+        return { ok: true };
+      },
+    },
     arquivos: {
-      ler: p => arquivos.get(p) ?? null,
-      escrever: (p, v) => (arquivos.set(p, v), true),
-      apagar: p => arquivos.delete(p),
-      listar: () => [...arquivos.keys()],
+      ler: p => mundo.files.get(p) ?? null,
+      escrever: (p, v) => (mundo.files.set(p, v), true),
+      apagar: p => mundo.files.delete(p),
+      listar: () => [...mundo.files.keys()],
+    },
+    volume: {
+      esperar: (token, caminho, tipos, prazo) => {
+        mundo.esperas.set(token, { caminho, pessoa: String(pessoa), tipos, ate: Date.now() + prazo * 1000 });
+        return true;
+      },
+      tamanho: c => (mundo.volumes.has(c) ? mundo.volumes.get(c).bytes.length : null),
+      servir: c => (mundo.volumes.has(c) ? c : null),
+      apagar: c => mundo.volumes.delete(c),
     },
   });
   vm.runInContext(fs.readFileSync(path.join(root, manifest.server), 'utf8'), ctx, { timeout: 1000 });
+  const contexto = {
+    person: String(pessoa), channel: Number(canal) === 0 ? null : Number(canal),
+    admin: String(pessoa) === '1', write: true, sala: mundo.salas.get(String(pessoa)) ?? null,
+  };
   ctx.contextoJSON = JSON.stringify(contexto);
   ctx.pedidoJSON = JSON.stringify(pedido);
-  const resposta = vm.runInContext('aoPedir(contextoJSON,pedidoJSON)', ctx, { timeout: 1000 });
-  if (Buffer.byteLength(JSON.stringify(dados)) > 256 * 1024) throw new Error('state-quota');
-  mundo.data = dados;
+  let resposta = JSON.parse(vm.runInContext('aoPedir(contextoJSON,pedidoJSON)', ctx, { timeout: 1000 }));
+  if (resposta.ok !== false && bytesDe(dados) > TETO_DO_QUINTAL) resposta = { ok: false, error: 'quintal-cheio' };
+  if (resposta.ok !== false) {
+    mundo.data = { ...dados };
+    // **Depois de o quintal gravar**, e a toda janela deste MOD neste servidor,
+    // inclusive a de quem pediu: o evento `servidor`.
+    for (const aviso of avisos) {
+      for (const [chave, sessao] of sessoes) {
+        if (chave.startsWith(chaveDoMundo + ':')) {
+          sessao.entregar(JSON.stringify({ tipo: 'evento', nome: 'servidor', canal: aviso.canal ?? null, carga: aviso.carga }));
+        }
+      }
+    }
+  }
   return resposta;
 }
 
@@ -128,44 +153,44 @@ function aoPedir(chaveDoMundo, contexto, pedido) {
 const sessoes = new Map();
 
 function sessaoDe(chave, mandarParaAJanela) {
-  if (sessoes.has(chave)) return sessoes.get(chave);
+  if (sessoes.has(chave)) {
+    sessoes.get(chave).mandar = mandarParaAJanela;
+    return sessoes.get(chave);
+  }
   const pendentes = [];
+  const sessao = { mandar: mandarParaAJanela };
   const contexto = vm.createContext({
     // **Sem DOM e sem Node.** O que existe aqui é o que o executor oferece: a
-    // ponte, o console e os temporizadores do anfitrião.
-    console: { log: () => {}, warn: () => {}, error: () => {} },
+    // ponte, a porta do registro e os temporizadores do anfitrião.
     setTimeout: (fn, ms) => setTimeout(fn, Math.min(Number(ms) || 0, 60000)),
     clearTimeout,
     setInterval: (fn, ms) => setInterval(fn, Math.max(Number(ms) || 0, 50)),
     clearInterval,
     seele: {
+      console: (nivel, texto) => console.log('[' + chave + ' ' + nivel + '] ' + texto),
       postar: texto => {
         // O teto de mensagem do executor, para o MOD bater nele aqui também.
-        if (texto.length > 12 * 1024) return false;
+        if (Buffer.byteLength(texto) > 12 * 1024) return false;
         pendentes.push(texto);
         queueMicrotask(() => {
-          while (pendentes.length) mandarParaAJanela(pendentes.shift());
+          while (pendentes.length) sessao.mandar(pendentes.shift());
         });
         return true;
       },
     },
   });
-  vm.runInContext(
-    `globalThis.__seeleCapacidades = ${JSON.stringify(capacidadesDaApi(manifest.api))};`,
-    contexto,
-  );
+  // O `console` que o V8 põe em todo contexto sai: quem o dá é o prelúdio.
+  vm.runInContext('delete globalThis.console;', contexto);
+  vm.runInContext(`globalThis.__seeleCapacidades = ${JSON.stringify(capacidades)};`, contexto);
   vm.runInContext(preludio, contexto, { timeout: 2000 });
   vm.runInContext(fs.readFileSync(path.join(root, manifest.client), 'utf8'), contexto, { timeout: 2000 });
-  const sessao = {
-    contexto,
-    entregar: json => {
-      try {
-        contexto.__entrada = json;
-        vm.runInContext('aoResponder(__entrada)', contexto, { timeout: 2000 });
-      } catch (erro) {
-        console.error('o MOD falhou ao receber:', erro.message);
-      }
-    },
+  sessao.entregar = json => {
+    try {
+      contexto.__entrada = json;
+      vm.runInContext('aoResponder(__entrada)', contexto, { timeout: 2000 });
+    } catch (erro) {
+      console.error('o MOD falhou ao receber:', erro.message);
+    }
   };
   sessoes.set(chave, sessao);
   return sessao;
@@ -186,31 +211,27 @@ const pagina = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
   <p>Identidades e transporte simulados; renderer e prelúdio reais. Dados temporários.
      O executor de verdade é o QuickJS do produto — este é o <code>vm</code> do Node.</p>
   <a href="/?pessoa=1">Host</a> · <a href="/?pessoa=2">Participante</a> ·
-  <a href="/?pessoa=3">Terceira pessoa</a> · <a href="/?servidor=b">Outro servidor</a>
+  <a href="/?pessoa=3">Terceira pessoa</a> · <a href="/?servidor=b">Outro servidor</a> ·
+  <a href="/?pessoa=2&onde=celular">Celular</a>
   <label> Canal <select id="canal"><option value="1">geral</option><option value="2">outro</option></select></label>
+  <label> Sala de voz <select id="sala"><option value="">fora de sala</option><option value="7">Taverna</option><option value="8">Porão</option></select></label>
   <button id="sair" type="button">Sair da sessão</button>
 </header>
 <main id="tela-sessao">
+  <nav id="navegacao"><ul id="lista-mods-navegacao" class="canais" hidden></ul><div id="acoes-das-salas"></div></nav>
+  <div id="canal-cabecalho-mods"></div>
+  <section id="palco-de-mods" hidden><p id="palco-de-mods-quem"></p><div id="palco-de-mods-miolo"></div></section>
+  <!--
+    **Dentro da tela, como no produto.** No \`index.html\` do SEELE os palcos
+    são filhos de \`section#tela-sessao\`, e não do \`<body>\`: \`prenderFoco\`
+    percorre os ancestrais do diálogo tornando os irmãos inertes, e um defeito
+    só aparecia com a hierarquia do produto.
+  -->
   <div id="palco-de-paginas" class="palco-de-paginas" hidden></div>
   <div id="palco-de-paineis" class="palco-de-paineis" hidden></div>
-  <aside id="regioes-dos-mods" class="regioes-dos-mods" hidden></aside>
-  <ul id="lista-roster" class="roster"></ul>
-  <ul id="lista-mods-navegacao" class="canais" hidden></ul>
-  <!--
-    **Dentro da tela, como no produto.** No \`index.html\` do SEELE os dois
-    palcos são filhos de \`section#tela-sessao\`, e não do \`<body>\`. Aqui eles
-    ficavam no \`<body>\`, e a diferença não era cosmética: \`prenderFoco\`
-    percorre os ancestrais do diálogo tornando os **irmãos** inertes, e a
-    revisão de 20/09/2026 encontrou um defeito que só aparecia com a hierarquia
-    do produto — o palco dentro de uma seção que virava inerte, levando o
-    próprio diálogo junto.
-
-    Um laboratório com estrutura diferente do produto não é um laboratório mais
-    simples: é um que aprova o que o produto recusa, e o criador de MOD aprende
-    nele.
-  -->
   <div id="palco-de-camadas" class="palco-de-camadas" hidden></div>
   <div id="avisos-de-mod" class="avisos-de-mod" hidden></div>
+  <div id="moderar" hidden></div>
 </main>
 <script src="/mods-estilos.js"></script>
 <script src="/mods-regiao.js"></script>
@@ -220,13 +241,9 @@ const pagina = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 </body></html>`;
 
 /**
- * A ponte da janela: o mínimo de `base.js` que o renderer exige.
- *
- * **O mínimo, e ele é dito.** `base.js` inteiro carrega o Tauri, a sessão, o
- * tema e a supervisão; nada disso existe aqui. O que o renderer precisa são
- * quatro funções — `$`, `elemento`, `repovoar` e `invoke` —, e elas estão
- * escritas aqui em vez de recortadas de lá: recortar por índice de string foi
- * exatamente o que deixou este laboratório obsoleto sem ninguém perceber.
+ * A ponte da janela: o mínimo de `base.js` que o renderer exige, escrito aqui
+ * em vez de recortado de lá. **O mínimo, e ele é dito**: `base.js` inteiro
+ * carrega o Tauri, a sessão e a supervisão; nada disso existe aqui.
  */
 const ponte = `const id=${JSON.stringify(manifest.id)};
 const $=n=>document.getElementById(n);
@@ -234,221 +251,277 @@ const elemento=(tag,classe,dentro)=>{const no=document.createElement(tag);if(cla
 const repovoar=(no,filhos)=>no.replaceChildren(...filhos);
 const params=new URLSearchParams(location.search);
 const pessoa=params.get('pessoa')||'1', servidor=params.get('servidor')||'a';
+// **Uma instância do MOD por janela**, como no produto: duas abas da mesma
+// pessoa são duas janelas, cada uma com o executor dela.
+const janela=Math.random().toString(36).slice(2);
+const onde=params.get('onde')==='celular'?'celular':'computador';
+const regioes=['redes','servidor.navegacao','operador.barra','canal.cabecalho','conversa.mensagem','compositor','pessoas.lista',
+  ...(onde==='celular'?[]:['status.barra']),'chamada.palco','pagina','dialogo','folha','aviso'];
+
+// **A confirmação é do produto.** Sem ela, o botão que declara \`confirmar\`
+// não faz nada — é o que \`confirmarAntes\` faz quando não há a quem perguntar.
+function abrirConfirmacao(titulo,texto,rotulo,aoSim,aoNao){
+  const caixa=$('moderar');caixa.hidden=false;
+  const sim=elemento('button','confirmar-sim',rotulo),nao=elemento('button','confirmar-nao','CANCELAR');
+  sim.type=nao.type='button';
+  const fechar=()=>{caixa.hidden=true;repovoar(caixa,[]);};
+  sim.onclick=()=>{fechar();aoSim();};nao.onclick=()=>{fechar();aoNao&&aoNao();};
+  repovoar(caixa,[elemento('h2','',titulo),elemento('p','',texto),nao,sim]);
+}
 
 // A instância de mentira: o renderer registra recursos nela, e sair os solta.
-//
-// **A funcao 'registrar' devolve o descartador**, como a do produto. Ela
-// devolvia o tamanho do vetor — o retorno de 'push' —, e um numero e truthy:
-// quem guardava esse retorno para esquecer o recurso depois guardava um 1, e
-// chama-lo era 'esquecer is not a function'. O laboratorio continuava verde
-// porque a saida da sessao nao era exercitada ate o fim.
-//
-// Idempotente e removendo a entrada, como 'InstanciaDeMod.registrar': um
-// recurso que sai antes da sessao nao pode ficar retido ate ela acabar, que e
-// o R4 da revisao de 20/09/2026.
 const recursos=[];
+// A API do pacote vai na instância e no dono, como em \`base.js\`: é por ela que
+// o renderer sabe que tipos de superfície e que recusas este MOD tem.
 const instancia={
+  api:${manifest.api},
   geracao:1,
   admite:()=>true,
   registrar:(porque,soltar)=>{
     let saiu=false;
     const entrada={porque,soltar};
     recursos.push(entrada);
-    // As duas metades, como as do produto: 'esquecer' tira da lista e devolve
-    // se havia o que tirar; chamar o descartador faz as duas coisas. Quem se
-    // descarta sozinho — uma superficie, por exemplo — chama so 'esquecer',
-    // para nao pedir de volta o descarte que ja esta acontecendo.
     const esquecer=()=>{
       if(saiu)return false;
       saiu=true;
-      const onde=recursos.indexOf(entrada);
-      if(onde>=0)recursos.splice(onde,1);
+      const i=recursos.indexOf(entrada);
+      if(i>=0)recursos.splice(i,1);
       return true;
     };
-    const soltarRecurso=()=>{
-      if(!esquecer())return;
-      try{soltar();}catch(e){console.warn(porque,e);}
-    };
+    const soltarRecurso=()=>{if(!esquecer())return;try{soltar();}catch(e){console.warn(porque,e);}};
     soltarRecurso.esquecer=esquecer;
     return soltarRecurso;
   },
 };
 
+const pedirAoServidor=async(canal,corpo)=>{
+  const r=await fetch('/pedido',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({servidor,pessoa,canal,corpo})});
+  return r.json();
+};
+
+const escolhidos=[];
 const dono={
   instancia,
+  api:${manifest.api},
   geracao:1,
   podeFalar:()=>true,
   falar:dados=>enviar({tipo:'evento',...dados}),
   abrirEndereco:url=>{console.log('abriria fora da janela:',url);},
-  escolherArquivo:async pedido=>{
-    // O seletor do sistema não existe aqui; o laboratório usa o do navegador,
-    // e diz para quê — que é o conserto de U22 sendo exercitado.
-    return new Promise(resolve=>{
-      const entrada=document.createElement('input');
-      entrada.type='file';
-      if(pedido&&pedido.extensoes&&pedido.extensoes.length)entrada.accept=pedido.extensoes.map(e=>'.'+e).join(',');
-      entrada.onchange=async()=>{
-        const arquivo=entrada.files[0];
-        if(!arquivo){resolve(null);return;}
-        const bytes=new Uint8Array(await arquivo.arrayBuffer());
-        const numero=escolhidos.push(bytes);
-        resolve({id:numero,tipo:arquivo.type||'application/octet-stream',papel:arquivo.type.startsWith('audio/')?'som':'imagem',bytes:bytes.length});
-      };
-      entrada.oncancel=()=>resolve(null);
-      entrada.click();
-    });
+  anotarRecusa:oQue=>console.warn('recusa:',oQue),
+  midiaMudou:()=>{},
+  aoFecharASuperficie:()=>{},
+  imagemDaPessoa:async()=>null,
+  recusaParaOMod:falha=>{
+    const nome=typeof falha?.recusa==='string'?falha.recusa:null;
+    if(!nome)return{erro:'falhou'};
+    return {...(falha.camposDaRecusa||{}),erro:nome};
   },
+  escolherArquivo:async pedido=>new Promise(resolve=>{
+    const entrada=document.createElement('input');
+    entrada.type='file';
+    if(pedido&&pedido.extensoes&&pedido.extensoes.length)entrada.accept=pedido.extensoes.map(e=>'.'+e).join(',');
+    entrada.onchange=async()=>{
+      const arquivo=entrada.files[0];
+      if(!arquivo){resolve(null);return;}
+      const bytes=new Uint8Array(await arquivo.arrayBuffer());
+      const numero=escolhidos.push({bytes,tipo:arquivo.type});
+      resolve({id:numero,tipo:arquivo.type||'application/octet-stream',papel:arquivo.type.startsWith('audio/')?'som':'imagem',bytes:bytes.length});
+    };
+    entrada.oncancel=()=>resolve(null);
+    entrada.click();
+  }),
   carregarMidia:async caminho=>{
     const r=await fetch('/arquivo?nome='+encodeURIComponent(caminho));
     if(!r.ok)throw new Error('arquivo-do-pacote-nao-servido');
     const {uri,papel,bytes}=await r.json();
-    return {uri,papel,bytes};
+    return papel==='som'?{papel,bytes}:{uri,papel,bytes};
   },
+  bytesDoSom:async caminho=>{
+    const r=await fetch('/arquivo?nome='+encodeURIComponent(caminho));
+    if(!r.ok)throw new Error('arquivo-do-pacote-nao-servido');
+    const {uri}=await r.json();
+    const bin=atob(uri.slice(uri.indexOf(',')+1));
+    const b=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)b[i]=bin.charCodeAt(i);
+    return b.buffer;
+  },
+  // **Pelo volume, ou pelas páginas antigas**, como \`carregarMidiaDoServidor\`
+  // em \`base.js\`: o volume vai pelo caminho que a metade de servidor deu, e as
+  // páginas seguem o \`proximo\` opaco que ela devolve.
   carregarMidiaDoServidor:async(canal,pedido,campo)=>{
-    const r=await fetch('/pedido',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({servidor,pessoa,canal,corpo:pedido})});
-    const resposta=await r.json();
-    const texto=resposta[campo];
-    if(typeof texto!=='string')throw new Error('sem-bytes');
-    const papel=texto.startsWith('data:audio')?'som':'imagem';
-    return {uri:texto,papel,bytes:texto.length};
+    if(pedido&&pedido.transporte==='volume'){
+      const r=await pedirAoServidor(canal,pedido);
+      if(!r.ok||typeof r.volume!=='string')throw new Error(r.error||'sem-volume');
+      const v=await (await fetch('/volume?servidor='+servidor+'&caminho='+encodeURIComponent(r.volume))).json();
+      return {uri:v.uri,papel:'imagem',bytes:v.bytes};
+    }
+    let atual=pedido,texto='';
+    for(let i=0;i<200;i++){
+      const r=await pedirAoServidor(canal,atual);
+      if(typeof r[campo]!=='string')throw new Error('a resposta do servidor não traz «'+campo+'»');
+      texto+=r[campo];
+      if(!r.proximo)break;
+      atual={...pedido,...r.proximo};
+    }
+    return {uri:texto,papel:texto.startsWith('data:audio')?'som':'imagem',bytes:texto.length};
   },
 };
-const escolhidos=[];
 
-// A raiz da regiao leva o 'data-mod' que o produto poe nela — e nao e detalhe:
-// e por ele que o teste do navegador encontra o que este MOD desenhou. Sem
-// ele, um MOD que nao declare cartao nenhum nao tem elemento nenhum marcado, e
-// o teste espera para sempre por algo que existe e nao esta nomeado.
-$('regioes-dos-mods').dataset.mod=id;
-const regiao=new RegiaoDeMod(id,dono,$('regioes-dos-mods'),PERFIS_DE_RENDER.regiao);
 const contribuicoes=new RegistroDeContribuicoes();
 const superficies=new SuperficiesDoMod(id,dono,{
   paginas:$('palco-de-paginas'),paineis:$('palco-de-paineis'),
   camadas:$('palco-de-camadas'),avisos:$('avisos-de-mod'),
 });
 
-contribuicoes.aoMudar(()=>{
-  const lista=$('lista-mods-navegacao');
-  const entradas=contribuicoes.para('servidor.navegacao');
-  lista.hidden=entradas.length===0;
-  repovoar(lista,entradas.map(e=>{
-    const item=elemento('li');
-    const b=elemento('button','linha entrada-de-mod');
-    b.type='button';
-    b.append(elemento('span','linha-rotulo',e.rotulo||e.mod),elemento('span','entrada-de-mod-origem',e.mod));
-    b.onclick=()=>dono.falar({nome:'acao',acao:e.acaoPrincipal||'abrir',pessoa:'',canal:''});
-    item.append(b);return item;
-  }));
-});
+/** O retrato que a janela projeta: só os campos da lista branca da 6. */
+function retrato(){
+  const aberto=Number($('canal').value);
+  const sala=$('sala').value?Number($('sala').value):null;
+  return {
+    eu:Number(pessoa),
+    servidor:{nome:'Servidor do laboratório '+servidor},
+    pessoas:[{id:1,apelido:'Alex',falando:false,mudo:false},{id:2,apelido:'Lia',falando:false,mudo:false},{id:3,apelido:'Rafa',falando:false,mudo:false}],
+    salas:[{id:7,nome:'Taverna',limite:0,pessoas:[],minha:sala===7},{id:8,nome:'Porão',limite:0,pessoas:[],minha:sala===8}],
+    canais:[{id:1,nome:'geral',aberto:aberto===1},{id:2,nome:'outro',aberto:aberto===2}],
+    onde,regioes,
+  };
+}
 
-let fonte=null;
+// Um renderer por contribuição que monta declaração, como \`montarContribuicao\`.
+const montadas=new Map();
+function montarContribuicao(c,perfil){
+  let m=montadas.get(c.handle);
+  if(!m){
+    const raiz=elemento('div','contribuicao-de-mod');raiz.dataset.mod=c.mod;raiz.dataset.ponto=c.ponto;
+    m={raiz,renderer:new RegiaoDeMod(c.mod,dono,raiz,PERFIS_DE_RENDER[perfil])};
+    montadas.set(c.handle,m);
+  }
+  const recusados=m.renderer.aplicar(c.conteudo);
+  if(recusados>0)dono.falar({nome:'contribuicao',ponto:c.ponto,destino:c.alvo,recusados});
+  return m.raiz;
+}
+function acaoDe(c,canal){
+  const b=elemento('button','acao-de-mod',c.rotulo||c.mod);b.type='button';
+  b.dataset.mod=c.mod;
+  b.onclick=()=>dono.falar({nome:'acao',acao:c.acaoPrincipal,pessoa:'',canal:canal===undefined?'':String(canal)});
+  return b;
+}
+function desenharContribuicoes(){
+  const nav=contribuicoes.para('servidor.navegacao');
+  $('lista-mods-navegacao').hidden=nav.length===0;
+  repovoar($('lista-mods-navegacao'),nav.map(e=>{const li=elemento('li');li.append(acaoDe(e));return li;}));
+  const canal=$('canal').value;
+  repovoar($('canal-cabecalho-mods'),contribuicoes.para('canal.cabecalho',canal).flatMap(c=>[
+    ...(c.conteudo?[montarContribuicao(c,'cartao')]:[]),...(c.acaoPrincipal?[acaoDe(c,canal)]:[])]));
+  repovoar($('acoes-das-salas'),['7','8'].flatMap(s=>contribuicoes.para('sala.acoes',s).map(c=>{
+    const b=acaoDe(c,s);b.textContent=c.rotulo+' · sala '+s;return b;})));
+  const naSala=Boolean($('sala').value);
+  const palco=naSala?contribuicoes.escolherSubstituicao('chamada.palco','','').escolhida:null;
+  repovoar($('palco-de-mods-miolo'),palco?[montarContribuicao(palco,'superficie')]:[]);
+  $('palco-de-mods').hidden=!palco;
+  $('palco-de-mods-quem').textContent=palco?'PALCO DE '+palco.mod:'';
+  for(const [handle,m] of montadas)if(!contribuicoes.porHandle.has(handle)){m.renderer.soltar();m.raiz.remove();montadas.delete(handle);}
+  if(palco)dizerOLugar('chamada.palco');
+}
+contribuicoes.aoMudar(desenharContribuicoes);
+
 function enviar(m){fetch('/para-o-mod',{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({servidor,pessoa,m})});}
-
+  body:JSON.stringify({servidor,pessoa,janela,m})});}
 function responder(n,ok,carga){enviar({tipo:'resposta',n,ok,...carga});}
+// **A montagem que não coube inteira**, como \`recusaDosNos\` em \`base.js\`: o
+// nome da lista fechada, a conta e a amostra do que foi. O que coube fica.
+const recusaDosNos=(s,recusados)=>Object.assign(new Error('nos-recusados'),{recusa:'nos-recusados',
+  camposDaRecusa:{recusados,amostra:Array.isArray(s?.renderer?.amostraDeRecusados)?s.renderer.amostraDeRecusados.map(r=>({...r})):[]}});
+
+const ditos=new Map();
+function dizerOLugar(regiao){
+  const caixa=regiao?$('palco-de-mods-miolo'):$('tela-sessao');
+  const largura=Math.round(caixa.clientWidth),altura=Math.round(regiao?Math.max(caixa.clientHeight,480):caixa.clientHeight);
+  const chave=largura+'×'+altura;
+  if(ditos.get(regiao||'')===chave)return;
+  ditos.set(regiao||'',chave);
+  dono.falar({nome:'lugar',onde,regioes,largura,altura,...(regiao?{regiao}:{})});
+}
+addEventListener('resize',()=>{dizerOLugar();if(!$('palco-de-mods').hidden)dizerOLugar('chamada.palco');});
 
 async function atender(m){
   try{
-    if(m.tipo==='snapshot'){
-      // A forma do Snapshot do produto: o canal aberto é o que tem «open».
-      // «open_channel» não existe lá, e o laboratório que o inventava provava
-      // a troca de canal por um caminho que a janela não percorre.
-      const aberto=Number($('canal').value);
-      responder(m.n,true,{valor:{servidor,me:Number(pessoa),
-        channels:[{id:1,name:'geral',open:aberto===1},{id:2,name:'outro',open:aberto===2}],
-        presentes:[{id:1,nickname:'Alex'},{id:2,nickname:'Lia'},{id:3,nickname:'Rafa'}]}});
-      return;
+    switch(m.tipo){
+      case 'retrato':responder(m.n,true,{valor:retrato()});dizerOLugar();return;
+      case 'pedido':responder(m.n,true,{valor:await pedirAoServidor(m.canal,m.valor)});return;
+      case 'tema':responder(m.n,false,{erro:'sem-previa'});return;
+      case 'enviar-imagem':{
+        const e=escolhidos[m.arquivo-1];
+        if(!e)throw Object.assign(new Error('sem-espera'),{recusa:'sem-espera'});
+        let bruto='';for(const b of e.bytes)bruto+=String.fromCharCode(b);
+        const r=await (await fetch('/enviar',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({servidor,pessoa,token:m.token,tipo:e.tipo,base64:btoa(bruto)})})).json();
+        if(!r.ok)throw Object.assign(new Error(r.erro),{recusa:r.erro});
+        responder(m.n,true,{valor:null});return;
+      }
+      case 'soltar-arquivo':responder(m.n,true,{valor:null});return;
+      case 'superficie-criar':responder(m.n,true,{valor:superficies.criar(m.descricao)});return;
+      case 'superficie-montar':{
+        const s=superficies.de(m.superficie),recusados=s.montar(m.arvore);
+        if(recusados>0)throw recusaDosNos(s,recusados);
+        responder(m.n,true,{valor:null});return;
+      }
+      case 'superficie-atualizar':{
+        const s=superficies.de(m.superficie),recusados=s.atualizar(m.chave,m.arvore);
+        if(recusados>0)throw recusaDosNos(s,recusados);
+        responder(m.n,true,{valor:null});return;
+      }
+      case 'formulario-erros':superficies.de(m.superficie).marcarErros(m.erros);responder(m.n,true,{valor:null});return;
+      case 'superficie-classes':{
+        const s=superficies.de(m.superficie),recusados=s.declararClasses(m.classes);
+        if(recusados>0)throw recusaDosNos(s,recusados);
+        responder(m.n,true,{valor:null});return;
+      }
+      case 'superficie-mostrar':superficies.de(m.superficie).mostrar();superficies.arrumarPalcos();responder(m.n,true,{valor:null});return;
+      case 'superficie-ocultar':superficies.de(m.superficie).ocultar();superficies.arrumarPalcos();responder(m.n,true,{valor:null});return;
+      case 'superficie-suja':superficies.de(m.superficie).marcarSuja(m.suja);responder(m.n,true,{valor:null});return;
+      case 'superficie-titulo':{
+        const s=superficies.de(m.superficie);s.titulo=String(m.titulo||'').slice(0,120);
+        if(s.tituloNo)s.tituloNo.textContent=s.titulo;
+        responder(m.n,true,{valor:null});return;
+      }
+      case 'superficie-fechar':superficies.fechar(m.superficie,m.motivo);responder(m.n,true,{valor:null});return;
+      case 'superficie-descartar':superficies.descartar(m.superficie);responder(m.n,true,{valor:null});return;
+      case 'contribuir':responder(m.n,true,{valor:contribuicoes.registrar({id},instancia,m.pedido)});return;
+      // Com o dono, como o roteador do produto: sem ele, o laboratório aceitaria
+      // o que o SEELE recusa, e ensinaria o contrário do contrato.
+      case 'revogar-contribuicao':responder(m.n,true,{valor:contribuicoes.revogar(m.handle,{id,instancia})});return;
+      case 'atualizar-contribuicao':{
+        const ok=contribuicoes.atualizar(m.handle,{id,instancia},m.conteudo);
+        desenharContribuicoes();
+        responder(m.n,true,{valor:ok});return;
+      }
+      default:throw new Error('a API de MODs não conhece «'+m.tipo+'»');
     }
-    if(m.tipo==='pedido'){
-      const r=await fetch('/pedido',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({servidor,pessoa,canal:m.canal,corpo:m.valor})});
-      responder(m.n,true,{valor:await r.json()});
-      return;
-    }
-    if(m.tipo==='regiao'){
-      $('regioes-dos-mods').hidden=false;
-      const recusados=regiao.aplicar(m.conteudo);
-      if(recusados>0)throw new Error(recusados+' nó(s) não couberam nos limites da região');
-      responder(m.n,true,{valor:null});return;
-    }
-    if(m.tipo==='tema'){responder(m.n,true,{valor:null});return;}
-    if(m.tipo==='cartoes'){
-      const recusados=regiao.declararCartoes(m.cartoes);
-      desenharRoster();
-      responder(m.n,true,{valor:recusados});return;
-    }
-    if(m.tipo==='pedaco'){
-      const bytes=escolhidos[m.arquivo-1];
-      if(!bytes)throw new Error('arquivo-nao-esta-de-pe');
-      const fatia=bytes.subarray(m.inicio,m.inicio+65535);
-      let bruto='';for(const b of fatia)bruto+=String.fromCharCode(b);
-      responder(m.n,true,{valor:btoa(bruto)});return;
-    }
-    if(m.tipo==='soltar-arquivo'){responder(m.n,true,{valor:null});return;}
-    if(m.tipo==='superficie-criar'){responder(m.n,true,{valor:superficies.criar(m.descricao)});return;}
-    if(m.tipo==='superficie-montar'){
-      const recusados=superficies.de(m.superficie).montar(m.arvore);
-      if(recusados>0)throw new Error(recusados+' nó(s) não couberam nos limites da superfície');
-      responder(m.n,true,{valor:null});return;
-    }
-    if(m.tipo==='superficie-classes'){
-      superficies.de(m.superficie).declararClasses(m.classes);
-      responder(m.n,true,{valor:null});return;
-    }
-    if(m.tipo==='superficie-mostrar'){superficies.de(m.superficie).mostrar();superficies.arrumarPalcos();responder(m.n,true,{valor:null});return;}
-    if(m.tipo==='superficie-ocultar'){superficies.de(m.superficie).ocultar();superficies.arrumarPalcos();responder(m.n,true,{valor:null});return;}
-    if(m.tipo==='superficie-suja'){superficies.de(m.superficie).marcarSuja(m.suja);responder(m.n,true,{valor:null});return;}
-    if(m.tipo==='superficie-titulo'){
-      const s=superficies.de(m.superficie);s.titulo=String(m.titulo||'');
-      if(s.tituloNo)s.tituloNo.textContent=s.titulo;
-      responder(m.n,true,{valor:null});return;
-    }
-    if(m.tipo==='superficie-fechar'){superficies.fechar(m.superficie,m.motivo);responder(m.n,true,{valor:null});return;}
-    if(m.tipo==='superficie-descartar'){superficies.descartar(m.superficie);responder(m.n,true,{valor:null});return;}
-    if(m.tipo==='contribuir'){responder(m.n,true,{valor:contribuicoes.registrar({id},instancia,m.pedido)});return;}
-    // Com o dono, como o roteador do produto: sem ele, o laboratório aceitaria
-    // uma revogação que o SEELE recusa, e ensinaria o contrário do contrato.
-    if(m.tipo==='revogar-contribuicao'){responder(m.n,true,{valor:contribuicoes.revogar(m.handle,{id,instancia})});return;}
-    throw new Error('a API de MODs não conhece «'+m.tipo+'»');
-  }catch(erro){responder(m.n,false,{erro:erro.message});}
+  }catch(falha){
+    responder(m.n,false,typeof falha?.recusa==='string'?{...(falha.camposDaRecusa||{}),erro:falha.recusa}:{erro:falha.message});
+  }
 }
 
-/** A lista de pessoas, com os cartões que o MOD declarou. */
-function desenharRoster(){
-  const lista=$('lista-roster');
-  const pessoas=[{id:1,nickname:'Alex'},{id:2,nickname:'Lia'},{id:3,nickname:'Rafa'}];
-  repovoar(lista,pessoas.map(p=>{
-    const item=elemento('li','pessoa');
-    const substituicao=contribuicoes.escolherSubstituicao('pessoa.cartao',String(p.id)).escolhida;
-    const cartao=regiao.cartaoDe(p.id);
-    if(substituicao&&cartao){
-      const porta=elemento('button','pessoa-apresentada-porta');
-      porta.type='button';
-      porta.setAttribute('aria-label',p.nickname+' — abrir em '+substituicao.mod);
-      porta.onclick=()=>dono.falar({nome:'acao',acao:substituicao.acaoPrincipal,pessoa:String(p.id),canal:''});
-      porta.append(cartao);
-      item.append(porta);
-    }else{
-      item.append(elemento('span','pessoa-nome',p.nickname));
-      if(cartao)item.append(cartao);
-    }
-    return item;
-  }));
-}
-desenharRoster();
+$('canal').onchange=()=>{desenharContribuicoes();dono.falar({nome:'canal',canal:Number($('canal').value)});};
+$('sala').onchange=async()=>{
+  const sala=$('sala').value?Number($('sala').value):null;
+  await fetch('/sala',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({servidor,pessoa,sala})});
+  desenharContribuicoes();
+  dono.falar({nome:'sala',sala});
+};
 
 $('sair').onclick=async()=>{
-  await fetch('/sair',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({servidor,pessoa})});
-  superficies.soltarTudo();contribuicoes.limpar();regiao.soltar();
+  await fetch('/sair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({servidor,pessoa,janela})});
+  superficies.soltarTudo();contribuicoes.limpar();
+  for(const [,m] of montadas){m.renderer.soltar();m.raiz.remove();}montadas.clear();
   for(const r of recursos.splice(0)){try{r.soltar();}catch(e){console.warn(r.porque,e);}}
   $('tela-sessao').hidden=true;
 };
 
 // A fita do executor chega por eventos do servidor: um MOD fala sem que a
 // janela tenha perguntado, e é isso que 'text/event-stream' modela.
-fonte=new EventSource('/do-mod?servidor='+servidor+'&pessoa='+pessoa);
+const fonte=new EventSource('/do-mod?servidor='+servidor+'&pessoa='+pessoa+'&janela='+janela);
 fonte.onmessage=e=>{void atender(JSON.parse(e.data));};
 `;
 
@@ -456,97 +529,83 @@ const css = `body{margin:0;padding:24px;background:var(--seele-negro-absoluto);c
 font:13px/1.6 var(--seele-mono,monospace)}
 a{color:var(--seele-laranja-nerv)} header{margin-bottom:24px}
 #tela-sessao{display:flex;flex-direction:column;gap:16px;border:1px solid var(--seele-linha);padding:16px;min-height:60vh}
-.roster{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;max-width:320px}
-.pessoa{border-left:3px solid var(--seele-linha);padding-left:8px}
-.regioes-dos-mods{display:flex;gap:1px;max-height:240px;overflow:auto;border-top:1px solid var(--seele-linha-forte)}
+#palco-de-mods{border:1px solid var(--seele-linha-forte);padding:8px;min-height:480px}
+#moderar{position:fixed;inset:30% 20%;z-index:1000;background:var(--seele-negro-absoluto);border:1px solid var(--seele-laranja-nerv);padding:16px}
 .palco-de-paginas,.palco-de-paineis{min-height:0}
-.canais{list-style:none;margin:0;padding:0}
-.linha{display:flex;gap:8px;width:100%;background:none;border:none;color:inherit;font:inherit;
-padding:6px 8px;cursor:pointer;text-align:left;border-left:3px solid transparent}
-.linha:hover{border-left-color:var(--seele-laranja-nerv)}`;
+.canais{list-style:none;margin:0;padding:0}`;
 
 // ------------------------------------------------------------ o servidor
 
-/** Quem está ouvindo a fita de qual sessão. */
-const ouvintes = new Map();
-
 const servidorHttp = http.createServer(async (req, res) => {
   res.setHeader('Content-Security-Policy',
-    "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self' data:");
+    "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:");
   try {
     const url = new URL(req.url, 'http://localhost');
     const corpo = async () => {
       let bruto = '';
       for await (const pedaco of req) {
         bruto += pedaco;
-        if (Buffer.byteLength(bruto) > 262144) throw new Error('pedido-grande-demais');
+        if (Buffer.byteLength(bruto) > 16 * 1024 * 1024) throw new Error('pedido-grande-demais');
       }
       return JSON.parse(bruto);
     };
+    const json = valor => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(valor)); };
 
     if (url.pathname === '/do-mod') {
-      const chave = `${url.searchParams.get('servidor')}:${url.searchParams.get('pessoa')}`;
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-      });
-      ouvintes.set(chave, res);
+      const chave = `${url.searchParams.get('servidor')}:${url.searchParams.get('pessoa')}:${url.searchParams.get('janela')}`;
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
       sessaoDe(chave, texto => res.write(`data: ${texto}\n\n`));
-      req.on('close', () => ouvintes.delete(chave));
+      // A janela fechou ou recarregou: a instância dela sai com ela.
+      req.on('close', () => sessoes.delete(chave));
       return;
     }
-
     if (url.pathname === '/para-o-mod' && req.method === 'POST') {
       const q = await corpo();
-      const chave = `${q.servidor}:${q.pessoa}`;
-      sessoes.get(chave)?.entregar(JSON.stringify(q.m));
-      res.end('{}');
-      return;
+      sessoes.get(`${q.servidor}:${q.pessoa}:${q.janela}`)?.entregar(JSON.stringify(q.m));
+      return json({});
     }
-
     if (url.pathname === '/sair' && req.method === 'POST') {
       const q = await corpo();
-      sessoes.delete(`${q.servidor}:${q.pessoa}`);
-      res.end('{}');
-      return;
+      sessoes.delete(`${q.servidor}:${q.pessoa}:${q.janela}`);
+      return json({});
     }
-
+    if (url.pathname === '/sala' && req.method === 'POST') {
+      const q = await corpo();
+      const salas = mundoDe(q.servidor || 'a').salas;
+      if (q.sala === null) salas.delete(String(q.pessoa)); else salas.set(String(q.pessoa), Number(q.sala));
+      return json({ ok: true });
+    }
     if (url.pathname === '/pedido' && req.method === 'POST') {
       const q = await corpo();
       if (!['1', '2', '3'].includes(String(q.pessoa))) throw new Error('identidade');
-      const resposta = aoPedir(q.servidor || 'a', {
-        person: String(q.pessoa),
-        channel: Number(q.canal || 1),
-        admin: String(q.pessoa) === '1',
-        write: true,
-      }, q.corpo);
-      res.setHeader('Content-Type', 'application/json');
-      res.end(resposta);
-      return;
+      return json(aoPedir(q.servidor || 'a', String(q.pessoa), q.canal ?? 1, q.corpo));
     }
-
+    // O envio pelo volume: só com o token que a metade de servidor deu a esta pessoa.
+    if (url.pathname === '/enviar' && req.method === 'POST') {
+      const q = await corpo();
+      const mundo = mundoDe(q.servidor || 'a');
+      const espera = mundo.esperas.get(q.token);
+      if (!espera || espera.pessoa !== String(q.pessoa) || espera.ate < Date.now()) return json({ ok: false, erro: 'sem-espera' });
+      const bytes = Buffer.from(q.base64, 'base64');
+      if (bytes.length > 10 * 1024 * 1024) return json({ ok: false, erro: 'arquivo-grande-demais' });
+      mundo.esperas.delete(q.token);
+      mundo.volumes.set(espera.caminho, { bytes, tipo: q.tipo || 'image/png' });
+      return json({ ok: true });
+    }
+    if (url.pathname === '/volume') {
+      const arquivo = mundoDe(url.searchParams.get('servidor') || 'a').volumes.get(url.searchParams.get('caminho'));
+      if (!arquivo) { res.statusCode = 404; return json({ ok: false, error: 'nao-esta-no-volume' }); }
+      return json({ uri: `data:${arquivo.tipo};base64,${arquivo.bytes.toString('base64')}`, bytes: arquivo.bytes.length });
+    }
     if (url.pathname === '/arquivo') {
       // **Só o que o manifesto declara.** É a mesma regra do produto: um
       // arquivo na pasta que ninguém nomeou não é servido.
       const nome = url.searchParams.get('nome') ?? '';
-      if (!(manifest.arquivos ?? []).includes(nome)) {
-        res.statusCode = 404;
-        res.end(JSON.stringify({ ok: false, error: 'arquivo-nao-declarado' }));
-        return;
-      }
+      if (!(manifest.arquivos ?? []).includes(nome)) { res.statusCode = 404; return json({ ok: false, error: 'arquivo-nao-declarado' }); }
       const bytes = fs.readFileSync(path.join(root, nome));
-      const tipo = nome.endsWith('.wav') ? 'audio/wav'
-        : nome.endsWith('.png') ? 'image/png'
-          : nome.endsWith('.jpg') || nome.endsWith('.jpeg') ? 'image/jpeg'
-            : nome.endsWith('.webp') ? 'image/webp' : 'application/octet-stream';
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({
-        uri: `data:${tipo};base64,${bytes.toString('base64')}`,
-        papel: tipo.startsWith('audio/') ? 'som' : 'imagem',
-        bytes: bytes.length,
-      }));
-      return;
+      const tipo = nome.endsWith('.wav') ? 'audio/wav' : nome.endsWith('.png') ? 'image/png'
+        : nome.endsWith('.jpg') || nome.endsWith('.jpeg') ? 'image/jpeg' : nome.endsWith('.webp') ? 'image/webp' : 'application/octet-stream';
+      return json({ uri: `data:${tipo};base64,${bytes.toString('base64')}`, papel: tipo.startsWith('audio/') ? 'som' : 'imagem', bytes: bytes.length });
     }
 
     const rotas = {

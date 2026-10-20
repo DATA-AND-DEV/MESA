@@ -6,14 +6,14 @@
 // bem composto» não são a mesma pergunta.
 //
 // Sobe o laboratório do pacote, semeia o estado que o caso precisa, abre a
-// atividade pela entrada de navegação e fotografa. Uma janela por execução: o
-// laboratório serve uma instância de MOD por (servidor, pessoa), e duas abas
-// na mesma corrida disputam a mesma.
+// atividade pela entrada de navegação e fotografa. O laboratório serve uma
+// instância de MOD por janela, como o produto.
 //
 //   node ferramentas/retratos.cjs <repo> <abrir|""> <prefixo> '<semente JSON>'
 //
 //   PESSOA=1     entra como quem hospeda (o `admin` do laboratório)
 //   ESTREITO=1   janela de 460px em vez de 1240px
+//   CELULAR=1    janela de 390 × 844, com `onde: 'celular'` no retrato
 //   CLIQUES="A|B" apertos por texto de botão, depois de abrir
 //   PROBE=<sel>  mede um nó e o imprime, para quando o retrato não explica
 //
@@ -58,13 +58,14 @@ const semeia = process.argv[5] ? JSON.parse(process.argv[5]) : [];
     for (const passo of semeia) await chamar(passo.corpo, passo.pessoa || '1');
 
     navegador = await chromium.launch({ headless: true });
-    const medidas = process.env.ESTREITO ? [['estreito', 460, 900]] : [['largo', 1240, 820]];
+    const medidas = process.env.CELULAR ? [['celular', 390, 844]]
+      : process.env.ESTREITO ? [['estreito', 460, 900]] : [['largo', 1240, 820]];
     for (const [nome, largura, altura] of medidas) {
       const aba = await navegador.newPage({ viewport: { width: largura, height: altura } });
       const erros = [];
       aba.on('pageerror', e => erros.push(e.message));
       aba.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') erros.push(m.text()); });
-      await aba.goto(url + '/?pessoa=2');
+      await aba.goto(url + '/?pessoa=' + (process.env.PESSOA || '2') + (process.env.CELULAR ? '&onde=celular' : ''));
       await aba.waitForTimeout(1200);
       if (acao) {
         const b = aba.locator('#lista-mods-navegacao button');
