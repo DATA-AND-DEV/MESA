@@ -1,14 +1,14 @@
 {
   "schema": 1,
   "id": "seele/mesa",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "api": 6,
   "repo": "https://github.com/DATA-AND-DEV/MESA",
   "reach": [
     "estado da campanha no servidor",
-    "mapas e retratos de personagem, pelo volume",
+    "mapas e retratos, pelo volume",
     "seletor de arquivos de quem usa",
-    "entrada na navegação do servidor",
+    "entrada na navegação",
     "cabeçalho do canal",
     "ações da sala de voz",
     "palco da chamada",
