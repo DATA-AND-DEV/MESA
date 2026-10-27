@@ -111,6 +111,21 @@ function interfaceMod(id, titulo) {
     return resposta;
   }
 
+  /**
+   * Uma **ação declarada** (API 7): o pedido que o servidor só deixa passar a quem tem a permissão dela. `SeeleMods.acao` só
+   * existe com a capacidade `acoes`. A recusa dos cargos chega como valor (`recusa`), e vira um `Error` com o código dela
+   * (`sem-permissao`, `acao-nao-declarada`), que a tabela de frases desta casa traduz. A janela não confere nada.
+   */
+  async function acao(canal, nome, valor) {
+    if (typeof api.acao !== 'function') throw new Error('sem-acoes');
+    const resposta = await api.acao(id, canal, nome, valor);
+    if (resposta?.ok) return resposta;
+    if (resposta?.recusa) throw new Error(resposta.recusa);
+    const falha = new Error(resposta?.error || 'O servidor recusou a consulta.');
+    if (resposta?.erros && typeof resposta.erros === 'object') falha.erros = resposta.erros;
+    throw falha;
+  }
+
   /** Uma atualização em voo e apenas o estado mais recente aguardando. */
   function agruparAtualizacoes(atualizar) {
     let emVoo = null;
@@ -118,13 +133,17 @@ function interfaceMod(id, titulo) {
     return (...args) => {
       proxima = args;
       if (!emVoo) {
+        // O `emVoo` zera NO FIM do laço, e não num `.finally` (um microtask depois): uma chamada que chegasse nesse intervalo
+        // gravava `proxima` depois de o laço ter olhado, via `emVoo` ainda de pé e nunca era atendida.
         emVoo = Promise.resolve().then(async () => {
-          while (proxima) {
-            const atuais = proxima;
-            proxima = null;
-            await atualizar(...atuais);
-          }
-        }).finally(() => { emVoo = null; });
+          try {
+            while (proxima) {
+              const atuais = proxima;
+              proxima = null;
+              await atualizar(...atuais);
+            }
+          } finally { emVoo = null; }
+        });
       }
       return emVoo;
     };
@@ -219,7 +238,7 @@ function interfaceMod(id, titulo) {
     caixa, pilha, grade, separador, espaco,
     formulario, acoes, abas, aba, textoLongo, numero, marca, distintivo,
     // servidor
-    request, agruparAtualizacoes, anotar, canalDe,
+    request, acao, agruparAtualizacoes, anotar, canalDe,
     // superfícies e contribuições
     superficie, pagina, dialogo, folha, avisar, dizer,
     contribuir, atualizarContribuicao, revogar, entrada,

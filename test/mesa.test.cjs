@@ -25,7 +25,12 @@ function session(random = [0.05, 0.95], opcoes = {}) {
   // e acima dele o anfitrião recusa a gravação com `quintal-cheio`.
   const teto = opcoes.teto ?? 256 * 1024;
   const usoDe = d => Object.entries(d).reduce((soma, [k, v]) => soma + bytes(k) + bytes(v), 0);
-  function request(person, op, extra = {}, channel = 1) {
+  // **O HOST das ações (API 7).** Quem tem cada permissão é dos cargos, e não da janela nem do pedido: por padrão a pessoa 1 (quem
+  // hospeda) tem `criar-campanha`. `concessoes` (pessoa -> lista) muda, e é lido a cada pedido (a revogação vale na hora).
+  const declaradas = JSON.parse(fs.readFileSync(path.join(__dirname, '../mod.json'), 'utf8')).permissoes.map(p => p.acao);
+  const concessoes = new Map([['1', [...declaradas]]]);
+  const concedidas = person => (concessoes.get(String(person)) ?? []).filter(a => declaradas.includes(a));
+  function request(person, op, extra = {}, channel = 1, acaoDoHost = null, escreve = true) {
     // A fresh runtime per request, just like the production API 2 bridge.
     const segurados = [];
     const avisar = aviso => {
@@ -54,8 +59,8 @@ function session(random = [0.05, 0.95], opcoes = {}) {
     };
     const context = { dados, volume, mundo: { agora: () => time, avisar }, arquivos: { ler: p => disk.get(p) ?? null, escrever: (p,v) => (disk.set(p,v), true), apagar: p => disk.delete(p), listar:()=>[...disk.keys()] } };
     let draw = 0; context.Math = Object.create(Math); context.Math.random = () => random[draw++ % random.length];
-    vm.createContext(context); vm.runInContext(source, context);
-    const ctx = {person:String(person),admin:person===1,write:true,channel,sala:salas[person] ?? null};
+    vm.createContext(context); vm.runInContext(opcoes.fonte ?? source, context);
+    const ctx = {person:String(person),admin:person===1,write:escreve,channel,sala:salas[person] ?? null,acao:acaoDoHost,permissoes:concedidas(person)};
     let r = JSON.parse(context.aoPedir(JSON.stringify(ctx),JSON.stringify({op,nonce:'n-'+(++serial),revision:revisions[channel] ?? 0,...extra})));
     // O anfitrião grava o quintal depois da chamada, e recusa acima do teto.
     if (r.ok && !opcoes.semUso && usoDe(context.dados) > teto) r = { ok: false, error: 'quintal-cheio' };
@@ -70,7 +75,13 @@ function session(random = [0.05, 0.95], opcoes = {}) {
     volumes.set(espera.caminho, tamanho);
     return { ok: true };
   };
-  return {request, disk, data, avisos, volumes, enviar, entrar:(person,sala)=>{salas[person]=sala;}, advance:seconds=>time+=seconds, setup:(channel=1)=>request(1,'setup',{name:'Casa',system:'dnd5e-2014',gm:'1'},channel)};
+  /** `SeeleMods.acao` no servidor: a ação declarada e a permissão da pessoa são conferidas ANTES da metade de servidor, que só então recebe o `contexto.acao`. */
+  function acao(person, nome, op, extra = {}, channel = 1, escreve = true) {
+    if (!declaradas.includes(nome)) return { ok: false, recusa: 'acao-nao-declarada' };
+    if (!concedidas(person).includes(nome)) return { ok: false, recusa: 'sem-permissao' };
+    return request(person, op, extra, channel, nome, escreve);
+  }
+  return {request, acao, concessoes, disk, data, avisos, volumes, enviar, entrar:(person,sala)=>{salas[person]=sala;}, advance:seconds=>time+=seconds, setup:(channel=1)=>acao(1,'criar-campanha','setup',{name:'Casa',system:'dnd5e-2014',gm:'1'},channel)};
 }
 /**
  * Uma imagem da 3.x, como ela ficou no disco: páginas de texto em `arquivos`,
@@ -87,11 +98,81 @@ function semearImagemDa3(s, { alvo, id, imagem, canal = 1 }) {
   s.data['campaign-' + canal] = JSON.stringify(c);
   return base;
 }
-test('only the server administrator creates a campaign; GM may be delegated',()=>{
-  const s=session();assert.equal(s.request(2,'setup',{name:'x',system:'free',gm:'2'}).error,'admin-only');
-  assert.equal(s.request(1,'setup',{name:'x',system:'free',gm:'2'}).isGM,false);
+test('only who has the action creates a campaign; GM may be delegated',()=>{
+  // Sem a permissão: o host recusa, pelo nome, e a metade de servidor nem roda.
+  const s=session();assert.deepEqual(s.acao(2,'criar-campanha','setup',{name:'x',system:'free',gm:'2'}),{ok:false,recusa:'sem-permissao'});
+  assert.deepEqual(s.acao(1,'apagar-tudo','setup',{name:'x',system:'free',gm:'2'}),{ok:false,recusa:'acao-nao-declarada'});
+  assert.equal(s.request(1,'view').campaign,null,'uma recusa criou a mesa');
+  assert.equal(s.acao(1,'criar-campanha','setup',{name:'x',system:'free',gm:'2'}).isGM,false);
   assert.equal(s.request(2,'scene-create',{name:'Mapa',kind:'map'}).ok,true);
   assert.equal(s.request(1,'scene-create',{name:'Mapa',kind:'map'}).error,'gm-only');
+});
+test('API 7: o ModRequest comum que imita a criação é NEGADO, até para quem tem a permissão',()=>{
+  const s=session();
+  const forjado={name:'x',system:'free',gm:'1',acao:'criar-campanha',admin:true,write:true,permissoes:['criar-campanha'],contexto:{acao:'criar-campanha',admin:true}};
+  for(const quem of [1,2]) assert.equal(s.request(quem,'setup',forjado).error,'pede-a-acao-criar-campanha','pessoa '+quem);
+  assert.equal(s.request(1,'view').campaign,null,'o pedido comum criou a mesa');
+});
+test('API 7: uma pessoa COMUM (não admin) que recebeu a ação cria a mesa, e o mestre e o dono das peças continuam valendo',()=>{
+  const s=session();s.concessoes.set('2',['criar-campanha']);
+  const criada=s.acao(2,'criar-campanha','setup',{name:'Da pessoa 2',system:'free',gm:'3'});
+  assert.equal(criada.ok,true,JSON.stringify(criada));
+  // As regras de sempre, DEPOIS da ação: o mestre é a pessoa 3 (e não quem criou nem o admin).
+  assert.equal(s.request(2,'scene-create',{name:'Mapa',kind:'map'}).error,'gm-only','quem criou virou mestre pela ação');
+  assert.equal(s.request(1,'scene-create',{name:'Mapa',kind:'map'}).error,'gm-only','o admin virou mestre');
+  const cena=s.request(3,'scene-create',{name:'Mapa',kind:'map'});assert.equal(cena.ok,true);
+  const ficha=s.request(3,'sheet-create',{name:'Iria',owner:'4'}).campaign.sheets[0].id;
+  assert.equal(s.request(5,'rest',{sheet:ficha}).error,'not-owner','quem não é dono mexeu na ficha');
+  assert.equal(s.request(4,'rest',{sheet:ficha}).ok,true,'o dono da ficha perdeu o direito');
+  assert.equal(s.request(2,'sheet-remove',{id:ficha}).error,'gm-only');
+});
+// **O cruzamento**: a ação legítima com o corpo de OUTRA operação. A exceção ao modo só leitura (`ctx.write`) é da criação, e só
+// dela: quem tem a permissão de criar a mesa não ganha, por isso, o poder de escrever numa mesa que já existe.
+test('API 7: a ação «criar-campanha» com o corpo de OUTRA operação é negada — sem escrita não altera a campanha, e a exceção é só do setup',()=>{
+  const s=session();s.concessoes.set('2',['criar-campanha']);
+  assert.equal(s.acao(1,'criar-campanha','setup',{name:'Existente',system:'free',gm:'2'}).ok,true);
+  const antes=JSON.stringify(JSON.parse(s.data['campaign-1']));
+  // O GM não-admin, SEM escrita no canal, com a permissão: o modo só leitura vale para tudo o que não é criar.
+  for(const [op,extra] of [['settings',{name:'Invadida',allowMove:true,allowEdit:true}],['scene-create',{name:'Cena',kind:'map'}],['sheet-create',{name:'Ficha',owner:'2'}],['initiative-clear',{}]]){
+    const r=s.acao(2,'criar-campanha',op,extra,1,false);
+    assert.equal(r.ok,false,'a ação «criar-campanha» alterou a campanha com a op '+op+': '+JSON.stringify(r).slice(0,120));
+    assert.equal(r.error,'read-only','op '+op+' sem escrita deveria ser read-only, deu '+r.error);
+  }
+  // Com escrita, a ação também não serve para outra operação: ela autoriza criar a mesa, e mais nada.
+  const r=s.acao(2,'criar-campanha','settings',{name:'Invadida',allowMove:true,allowEdit:true},1,true);
+  assert.equal(r.ok,false);assert.equal(r.error,'acao-so-cria-a-mesa');
+  assert.equal(JSON.stringify(JSON.parse(s.data['campaign-1'])),antes,'a campanha existente mudou');
+  // E o setup com a ação continua passando para quem não escreve no canal (como o admin passava).
+  const nova=s.acao(2,'criar-campanha','setup',{name:'Sem escrita',system:'free',gm:'2'},2,false);
+  assert.equal(nova.ok,true,JSON.stringify(nova));
+});
+test('API 7: a revogação no servidor nega a ação na hora, mesmo para quem já abriu a janela',()=>{
+  const s=session();s.concessoes.set('2',['criar-campanha']);
+  assert.equal(s.acao(2,'criar-campanha','setup',{name:'a',system:'free',gm:'2'},1).ok,true);
+  s.concessoes.set('2',[]);
+  assert.deepEqual(s.acao(2,'criar-campanha','setup',{name:'b',system:'free',gm:'2'},2),{ok:false,recusa:'sem-permissao'});
+  assert.equal(s.request(2,'view',{},2).campaign,null,'criou depois da revogação');
+  assert.equal(s.request(2,'view',{},2).canSetup,false,'o canSetup (informativo) seguiu mostrando o botão');
+});
+test('atualizar da 4.0.0 (API 6) para a 5.0.0 mantém as campanhas, as fichas e as regras de dono e de mestre',()=>{
+  const velha=path.join(__dirname,'../../../mods-oficiais-017/mesa');
+  const m4=JSON.parse(fs.readFileSync(path.join(velha,'mod.json'),'utf8'));
+  assert.equal(m4.api,6);assert.equal(m4.version,'4.0.0');
+  const s4=session([0.5],{fonte:fs.readFileSync(path.join(velha,'servidor/main.js'),'utf8')});
+  assert.equal(s4.request(1,'setup',{name:'Casa',system:'dnd5e-2014',gm:'3'}).ok,true,'a 4.0.0 criou a mesa pelo admin');
+  const ficha=s4.request(3,'sheet-create',{name:'Iria',owner:'2'}).campaign.sheets[0].id;
+  const antes=JSON.parse(s4.data['campaign-1']);
+  // A 5.0.0 sobe sobre o MESMO quintal.
+  const s5=session([0.5]);Object.assign(s5.data,JSON.parse(JSON.stringify(s4.data)));
+  const visto=s5.request(3,'view');
+  assert.equal(visto.ok,true);assert.equal(visto.campaign.name,'Casa');assert.equal(visto.campaign.sheets.length,1,'a ficha se perdeu');
+  assert.equal(JSON.stringify(JSON.parse(s5.data['campaign-1']).sheets.map(f=>f.id)),JSON.stringify(antes.sheets.map(f=>f.id)));
+  // O dono e o mestre seguem valendo; criar OUTRA mesa por cima da que existe continua recusado.
+  assert.equal(s5.request(4,'rest',{sheet:ficha}).error,'not-owner');
+  assert.equal(s5.request(3,'sheet-remove',{id:ficha}).ok,true);
+  assert.equal(s5.acao(1,'criar-campanha','setup',{name:'Outra',system:'free',gm:'1'}).error,'already-created');
+  // E o pedido comum da 4.0.0 que criava a mesa (admin, sem ação) não cria mais na 5.0.0.
+  assert.equal(s5.request(1,'setup',{name:'Legado',system:'free',gm:'1'},2).error,'pede-a-acao-criar-campanha');
 });
 test('private sheets, prepared scenes, GM notes and hidden pieces never reach players',()=>{
   const s=session();s.setup();s.request(1,'sheet-create',{name:'Iria',owner:'2'});s.request(1,'sheet-create',{name:'Brann',owner:'3'});
@@ -465,9 +546,9 @@ test('a sheet refusal names the field and says why',()=>{
 });
 test('campaign, action, entry and scene refusals name the field',()=>{
   const s=session();
-  assert.deepEqual(s.request(1,'setup',{name:'',system:'free',gm:'1'}).erros,{name:'obrigatório'});
-  assert.deepEqual(s.request(1,'setup',{name:'Casa',system:'gurps',gm:'1'}).erros,{system:'um dos sistemas oferecidos'});
-  assert.deepEqual(s.request(1,'setup',{name:'Casa',system:'free',gm:'ninguém'}).erros,{gm:'uma pessoa deste servidor'});
+  assert.deepEqual(s.acao(1,'criar-campanha','setup',{name:'',system:'free',gm:'1'}).erros,{name:'obrigatório'});
+  assert.deepEqual(s.acao(1,'criar-campanha','setup',{name:'Casa',system:'gurps',gm:'1'}).erros,{system:'um dos sistemas oferecidos'});
+  assert.deepEqual(s.acao(1,'criar-campanha','setup',{name:'Casa',system:'free',gm:'ninguém'}).erros,{gm:'uma pessoa deste servidor'});
   s.setup();const ficha=s.request(1,'sheet-create',{name:'Iria',owner:'2'}).campaign.sheets[0].id;
   assert.deepEqual(s.request(2,'action-save',{sheet:ficha,name:'Arco',kind:'action',formula:'abc',max:1,used:0,recharge:'long'}).erros,{formula:'uma fórmula como 1d20+3'});
   assert.deepEqual(s.request(2,'action-save',{sheet:ficha,name:'Arco',kind:'action',formula:'',max:100,used:0,recharge:'long'}).erros,{max:'um número inteiro de 0 a 99'});

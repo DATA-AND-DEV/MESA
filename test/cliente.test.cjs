@@ -79,8 +79,9 @@ test('o laboratório é o contrato: o MOD não tem snapshot, região nem painel'
   // O pacote declara a API que o produto aceita: um `mod.json` de API 4 seria
   // recusado pelo app 0.16 com `ApiTooOld`, e o executor daria a ele as
   // capacidades da 4 — sem retrato, sem volume e sem aviso do servidor.
-  assert.deepEqual(lab.contrato.compatibilidade.aceitas, [lab.manifesto.api]);
-  assert.match(lab.manifesto.version, /^4\./, 'a versão do pacote da API 6 é a 4.x');
+  assert.ok(lab.contratoV7.compatibilidade.aceitas.includes(lab.manifesto.api), 'a API que o pacote declara não é aceita pela v7');
+  assert.equal(lab.manifesto.api, 7);
+  assert.match(lab.manifesto.version, /^5\./, 'a versão do pacote da API 7 é a 5.x (D-mods-1: 3.x = 0.15, 4.x = API 6, 5.x = API 7)');
   assert.ok(!lab.manifesto.reach.includes('regiao'), 'o reach diz «regiao», que a API 6 não tem');
   assert.ok(!lab.contrato.superficies.tipos.includes('painel'));
   assert.throws(() => lab.conferirDeclaracao({ forma: 'painel' }, lab.PERFIS.superficie, 'x'), /forma que a API 6 não tem/);
@@ -752,7 +753,7 @@ test('quem não administra não vê o formulário de criação', async () => {
   const janela = await janelaPronta(servidor, { pessoa: '2' });
   await abrirAMesa(janela);
   assert.equal(janela.controles('mesa').get('abrir-criar'), undefined);
-  assert.match(janela.texto('mesa'), /Quem administra/);
+  assert.match(janela.texto('mesa'), /pede a permissão «Criar a mesa de um canal»/);
 });
 
 // ------------------------------------------------------------- o celular
@@ -1324,4 +1325,51 @@ test('as classes recusadas pelo SEELE não impedem a página de abrir', async ()
   assert.ok(pagina.montagens >= 1);
   assert.match(janela.texto('mesa'), /Cripta/);
   assert.match(janela.avisos.map(a => a.texto).join(' | '), /o SEELE não montou parte do que a mesa declarou/);
+});
+
+// ------------------------------------------------- a API 7: criar a mesa é uma ação
+
+test('API 7: criar a mesa vai por SeeleMods.acao(id, canal, «criar-campanha», valor); a leitura segue por request', async () => {
+  const servidor = criarServidor();
+  const janela = await janelaPronta(servidor);
+  await abrirAMesa(janela);
+  janela.apertar('abrir-criar');
+  await assentar();
+  janela.submeter('mesa-criar', 'form-criar', { name: 'A Torre', system: 'free', gm: '2' });
+  await assentar();
+  assert.deepEqual(janela.acoes.map(a => [a.canal, a.nome, a.valor.op]), [[1, 'criar-campanha', 'setup']]);
+  assert.ok(janela.pedidos.every(p => p.valor.op !== 'setup'), 'a criação saiu pelo request comum');
+  assert.equal(JSON.parse(servidor.data['campaign-1']).name, 'A Torre');
+});
+
+test('API 7: sem a permissão a mesa DIZ por quê (visível), e quem a recebeu sem ser admin cria', async () => {
+  const servidor = criarServidor();
+  const semAcao = await janelaPronta(servidor, { pessoa: '2' });
+  await abrirAMesa(semAcao);
+  assert.equal(semAcao.controles('mesa').get('abrir-criar'), undefined);
+  assert.match(semAcao.texto('mesa'), /pede a permissão «Criar a mesa de um canal»/);
+  servidor.concessoes.set('2', ['criar-campanha']);
+  const comAcao = await janelaPronta(servidor, { pessoa: '2' });
+  await abrirAMesa(comAcao);
+  assert.ok(comAcao.controles('mesa').get('abrir-criar'), 'quem recebeu a ação não vê CRIAR MESA');
+  comAcao.apertar('abrir-criar'); await assentar();
+  comAcao.submeter('mesa-criar', 'form-criar', { name: 'Da pessoa comum', system: 'free', gm: '2' });
+  await assentar();
+  assert.equal(JSON.parse(servidor.data['campaign-1']).name, 'Da pessoa comum');
+});
+
+test('API 7: a revogação no servidor nega a criação com a janela já aberta, e a recusa aparece na mesa', async () => {
+  const servidor = criarServidor();
+  servidor.concessoes.set('2', ['criar-campanha']);
+  const janela = await janelaPronta(servidor, { pessoa: '2' });
+  await abrirAMesa(janela);
+  assert.ok(janela.controles('mesa').get('abrir-criar'));
+  servidor.concessoes.set('2', []);
+  janela.apertar('abrir-criar'); await assentar();
+  janela.submeter('mesa-criar', 'form-criar', { name: 'Revogada', system: 'free', gm: '2' });
+  await assentar(20);
+  assert.equal(servidor.data['campaign-1'], undefined, 'criou depois da revogação');
+  assert.equal(janela.acoes.length, 1, 'a janela deixou de pedir: ela não decide nada');
+  const dito = JSON.stringify([...janela.superficies.values()].map(sf => sf.declaracao ?? null)) + JSON.stringify(janela.avisos);
+  assert.match(dito, /não tem a permissão «Criar a mesa de um canal»/);
 });

@@ -42,6 +42,15 @@ const bytesDoContrato = fs.readFileSync(path.join(__dirname, 'contrato/api-v6.js
 assert.equal(crypto.createHash('sha256').update(bytesDoContrato).digest('hex'), HASH_DO_CONTRATO,
   'test/contrato/api-v6.json não é o api/v6.json congelado: copie de novo do SEELE, e não edite');
 const contrato = JSON.parse(bytesDoContrato);
+/**
+ * A v7 é a v6 inteira mais as ações (`api/v7.json`). **Ainda pode emendar até a 0.17 sair** (`api/congeladas.sha256`): o hash é
+ * o da cópia que este pacote leu; se o SEELE emendar a v7, copie de novo e atualize o número.
+ */
+const HASH_DA_V7_DE_HOJE = 'd7f423c1ef43ac239bd68260d8dd8fa7813ab7697cd8003c8a0a9d3bccb37474';
+const bytesDaV7 = fs.readFileSync(path.join(__dirname, 'contrato/api-v7.json'));
+assert.equal(crypto.createHash('sha256').update(bytesDaV7).digest('hex'), HASH_DA_V7_DE_HOJE,
+  'test/contrato/api-v7.json não é o api/v7.json de hoje: copie de novo do SEELE e atualize o hash');
+const contratoV7 = JSON.parse(bytesDaV7);
 
 const FORMAS = new Set(contrato.formas);
 const FIGURAS = new Set(contrato.figuras);
@@ -238,7 +247,11 @@ function criarServidor(opcoes = {}) {
   const usoDe = d => Object.entries(d).reduce((n, [k, v]) => n + bytes(k) + bytes(v), 0);
 
   /** Uma volta da metade de servidor, como o `pedidos::executar` do SEELE. */
-  function pedir(pessoa, canal, valor) {
+  const declaradas = (manifesto.permissoes ?? []).map(p => p.acao);
+  /** Quem tem cada permissão é dos cargos. Padrão: a pessoa '1' (quem hospeda) tem todas as declaradas. `servidor.concessoes` muda. */
+  const concessoes = new Map([['1', [...declaradas]]]);
+  const concedidas = pessoa => (concessoes.get(String(pessoa)) ?? []).filter(a => declaradas.includes(a));
+  function pedir(pessoa, canal, valor, acaoDoHost = null) {
     atividade += 1;
     const segurados = [];
     const avisar = aviso => {
@@ -266,7 +279,7 @@ function criarServidor(opcoes = {}) {
       arquivos: { ler: p => disco.get(p) ?? null, escrever: (p, v) => (disco.set(p, v), true), apagar: p => disco.delete(p), listar: () => [...disco.keys()] },
     });
     vm.runInContext(fonteDoServidor, contexto);
-    const ctx = { person: String(pessoa), channel: canal === 0 ? null : canal, admin: String(pessoa) === '1', write: true, sala: salas.get(String(pessoa)) ?? null };
+    const ctx = { person: String(pessoa), channel: canal === 0 ? null : canal, admin: String(pessoa) === '1', write: true, sala: salas.get(String(pessoa)) ?? null, acao: acaoDoHost, permissoes: concedidas(pessoa) };
     let resposta = JSON.parse(contexto.aoPedir(JSON.stringify(ctx), JSON.stringify(valor)));
     if (resposta.ok !== false && usoDe(contexto.dados) > teto) resposta = { ok: false, error: 'quintal-cheio' };
     if (resposta.ok !== false) {
@@ -293,14 +306,25 @@ function criarServidor(opcoes = {}) {
     volumes.set(espera.caminho, tamanho);
   }
 
+  /**
+   * `SeeleMods.acao` do ponto de vista do servidor: confere a ação declarada e a permissão da pessoa ANTES de chamar a metade de
+   * servidor, e só então escreve o `contexto.acao`. A recusa volta como valor, como no produto.
+   */
+  function acao(pessoa, canal, nome, valor) {
+    if (!declaradas.includes(nome)) return { ok: false, recusa: 'acao-nao-declarada' };
+    if (!concedidas(pessoa).includes(nome)) return { ok: false, recusa: 'sem-permissao' };
+    return pedir(pessoa, canal, valor, nome);
+  }
+
   const servidor = {
-    data, disco, volumes, avisos, salas, janelas, pedir, enviar, duranteOEnvio: null, atraso: null, antesDePedir: null, atrasoDaResposta: null,
+    data, disco, volumes, avisos, salas, janelas, pedir, acao, concessoes, enviar, duranteOEnvio: null, atraso: null, antesDePedir: null, atrasoDaResposta: null,
     avancar: segundos => { agora += segundos; },
     /** Uma escrita direta, sem janela, para semear o caso. */
     escrever(pessoa, canal, valor) {
       const visto = pedir(pessoa, canal, { op: 'view' });
       const revision = visto.campaign ? visto.campaign.revision : 0;
-      const r = pedir(pessoa, canal, { nonce: 'semente-' + crypto.randomUUID().slice(0, 8), revision, ...valor });
+      const corpo = { nonce: 'semente-' + crypto.randomUUID().slice(0, 8), revision, ...valor };
+      const r = valor.op === 'setup' ? acao(pessoa, canal, 'criar-campanha', corpo) : pedir(pessoa, canal, corpo);
       assert.notEqual(r.ok, false, JSON.stringify(valor) + ' → ' + r.error);
       return r;
     },
@@ -349,6 +373,7 @@ function criarJanela(servidor, opcoes = {}) {
   const recusas = [];
   const erros = [];
   const pedidos = [];
+  const acoes = [];
   const mensagens = [];
   const relogios = [];
   const ausentes = new Set(opcoes.ausentes ?? (onde === 'celular' ? ['status.barra'] : []));
@@ -535,6 +560,14 @@ function criarJanela(servidor, opcoes = {}) {
     setInterval: () => 0,
     clearInterval: () => {},
     SeeleMods: Object.freeze({
+      ...(opcoes.semAcoes ? {} : {
+        acao: (id, canal, nome, valor) => pedir('pedido', { id, canal, nome, valor }, async () => {
+          assert.equal(id, manifesto.id, 'o MOD pediu em nome de outro');
+          acoes.push({ canal, nome, valor: JSON.parse(JSON.stringify(valor)) });
+          if (servidor.atraso) await servidor.atraso(pessoa, canal, valor);
+          return servidor.acao(pessoa, canal, nome, valor);
+        }),
+      }),
       request: (id, canal, valor) => pedir('pedido', { id, canal, valor }, async () => {
         assert.equal(id, manifesto.id, 'o MOD pediu em nome de outro');
         pedidos.push({ canal, valor: JSON.parse(JSON.stringify(valor)) });
@@ -554,7 +587,7 @@ function criarJanela(servidor, opcoes = {}) {
       retrato: async () => JSON.parse(JSON.stringify(retrato)),
       superficies: superficiesDaApi,
       contribuicoes: contribuicoesDaApi,
-      capacidades: () => contrato.compatibilidade['capacidades-por-versao']['6']
+      capacidades: () => contratoV7.compatibilidade['capacidades-por-versao']['7']
         .filter(c => !(semEnviar && c === 'volume') && !(semArquivo && c === 'arquivo')),
       aoEvento: fn => { ouvinte = typeof fn === 'function' ? fn : null; },
       ...(semEnviar ? {} : {
@@ -574,7 +607,7 @@ function criarJanela(servidor, opcoes = {}) {
   vm.createContext(sandbox);
 
   const janela = {
-    pessoa, retrato, superficies, contribuicoes, avisos, recusas, erros, pedidos, mensagens, relogios, escolhidos,
+    pessoa, retrato, superficies, contribuicoes, avisos, recusas, erros, pedidos, acoes, mensagens, relogios, escolhidos,
     /** O que a pessoa faz, ou o que a tela muda: um evento como o produto o manda. */
     emitir(evento) {
       assert.ok(EVENTOS.has(evento.nome), `evento que a API 6 não tem: «${evento.nome}»`);
@@ -719,4 +752,4 @@ async function assentar() {
   }
 }
 
-module.exports = { contrato, manifesto, criarServidor, criarJanela, assentar, bytes, conferirDeclaracao, PERFIS };
+module.exports = { contrato, contratoV7, manifesto, criarServidor, criarJanela, assentar, bytes, conferirDeclaracao, PERFIS };

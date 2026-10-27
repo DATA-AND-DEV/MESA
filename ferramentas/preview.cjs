@@ -2,13 +2,13 @@
 //
 // # O que este laboratório prova, e o que ele não prova
 //
-// É a API 6 do app 0.16, com as peças de verdade onde dá:
+// É a API 7 do app 0.17, com as peças de verdade onde dá:
 //
 // - **o prelúdio vem de onde ele mora**: `crates/seele-motor/src/preludio.rs`,
 //   recortado da constante `PRELUDIO`. Um prelúdio que não for encontrado é um
 //   erro com o caminho, e não um `undefined` que roda o MOD sem API;
-// - **as capacidades são as do contrato** (`api/v6.json`, a cópia conferida em
-//   `test/contrato/api-v6.json`): o `SeeleUI` nasce sem `regiao`, sem
+// - **as capacidades são as do contrato** (`api/v7.json`, a cópia conferida em
+//   `test/contrato/api-v7.json`): o `SeeleUI` nasce sem `regiao`, sem
 //   `snapshot` e sem `cartoes`, como no produto;
 // - **o código do MOD roda num contexto sem DOM e sem Node**, com a fachada de
 //   mensagens do executor (`seele.postar` e `seele.console`). Não é QuickJS — é
@@ -33,14 +33,14 @@ const root = process.env.MOD_PACKAGE || path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'mod.json')));
 const seele = process.env.SEELE_RAIZ || path.resolve(__dirname, '../../SEELE');
 const produto = process.env.SEELE_UI || path.join(seele, 'apps/seele-app/ui');
-const contrato = JSON.parse(fs.readFileSync(path.join(__dirname, '../test/contrato/api-v6.json'), 'utf8'));
+const contrato = JSON.parse(fs.readFileSync(path.join(__dirname, '../test/contrato/api-v7.json'), 'utf8'));
 
 /** Lê um arquivo do produto, dizendo o caminho quando ele não está lá. */
 function doProduto(relativo) {
   const caminho = path.join(produto, relativo);
   if (!fs.existsSync(caminho)) {
     throw new Error(`O laboratório precisa de ${caminho}. `
-      + 'Aponte SEELE_UI para a pasta `apps/seele-app/ui` de um checkout do SEELE 0.16.');
+      + 'Aponte SEELE_UI para a pasta `apps/seele-app/ui` de um checkout do SEELE 0.17.');
   }
   return fs.readFileSync(caminho, 'utf8');
 }
@@ -55,7 +55,7 @@ function preludioDoMotor() {
   const fonte = path.join(seele, 'crates/seele-motor/src/preludio.rs');
   if (!fs.existsSync(fonte)) {
     throw new Error(`O laboratório precisa de ${fonte}. `
-      + 'Aponte SEELE_RAIZ para um checkout do SEELE 0.16.');
+      + 'Aponte SEELE_RAIZ para um checkout do SEELE 0.17.');
   }
   const texto = fs.readFileSync(fonte, 'utf8');
   const marca = 'pub const PRELUDIO: &str = r#"';
@@ -69,8 +69,8 @@ function preludioDoMotor() {
 }
 
 const preludio = preludioDoMotor();
-if (manifest.api !== 6) throw new Error('Este laboratório é da API 6, e o mod.json declara a ' + manifest.api + '.');
-const capacidades = contrato.compatibilidade['capacidades-por-versao']['6'];
+if (manifest.api !== 7) throw new Error('Este laboratório é da API 7 (a 6 inteira, mais as ações), e o mod.json declara a ' + manifest.api + '.');
+const capacidades = contrato.compatibilidade['capacidades-por-versao'][String(manifest.api)];
 
 // ------------------------------------------------------- o mundo de mentira
 
@@ -88,7 +88,15 @@ const TETO_DO_QUINTAL = 256 * 1024;
 const bytesDe = d => Object.entries(d).reduce((n, [k, v]) => n + Buffer.byteLength(k) + Buffer.byteLength(String(v)), 0);
 
 /** Uma volta ao servidor deste MOD, no `vm`, com o disco e o volume de mentira. */
-function aoPedir(chaveDoMundo, pessoa, canal, pedido) {
+/** As ações que o manifesto declara e quem as tem: no laboratório, quem hospeda (a pessoa 1) tem todas. O HOST escreve `contexto.acao`. */
+const declaradasDoManifesto = () => (manifest.permissoes ?? []).map(p => p.acao);
+const concedidasA = pessoa => (String(pessoa) === '1' ? declaradasDoManifesto() : []);
+function aoPedirPelaAcao(chaveDoMundo, pessoa, canal, acao, pedido) {
+  if (!declaradasDoManifesto().includes(acao)) return { ok: false, recusa: 'acao-nao-declarada' };
+  if (!concedidasA(pessoa).includes(acao)) return { ok: false, recusa: 'sem-permissao' };
+  return aoPedir(chaveDoMundo, pessoa, canal, pedido, acao);
+}
+function aoPedir(chaveDoMundo, pessoa, canal, pedido, acaoDoHost = null) {
   const mundo = mundoDe(chaveDoMundo);
   const dados = structuredClone(mundo.data);
   Object.defineProperty(dados, 'uso', { value: () => bytesDe(dados), enumerable: false });
@@ -124,6 +132,7 @@ function aoPedir(chaveDoMundo, pessoa, canal, pedido) {
   const contexto = {
     person: String(pessoa), channel: Number(canal) === 0 ? null : Number(canal),
     admin: String(pessoa) === '1', write: true, sala: mundo.salas.get(String(pessoa)) ?? null,
+    acao: acaoDoHost, permissoes: concedidasA(pessoa),
   };
   ctx.contextoJSON = JSON.stringify(contexto);
   ctx.pedidoJSON = JSON.stringify(pedido);
@@ -294,6 +303,11 @@ const instancia={
   },
 };
 
+const pedirAAcao=async(canal,acao,corpo)=>{
+  const r=await fetch('/acao',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({servidor,pessoa,canal,acao,corpo})});
+  return r.json();
+};
 const pedirAoServidor=async(canal,corpo)=>{
   const r=await fetch('/pedido',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({servidor,pessoa,canal,corpo})});
@@ -449,6 +463,7 @@ async function atender(m){
     switch(m.tipo){
       case 'retrato':responder(m.n,true,{valor:retrato()});dizerOLugar();return;
       case 'pedido':responder(m.n,true,{valor:await pedirAoServidor(m.canal,m.valor)});return;
+      case 'acao':responder(m.n,true,{valor:await pedirAAcao(m.canal,m.acao,m.valor)});return;
       case 'tema':responder(m.n,false,{erro:'sem-previa'});return;
       case 'enviar-imagem':{
         const e=escolhidos[m.arquivo-1];
@@ -579,6 +594,12 @@ const servidorHttp = http.createServer(async (req, res) => {
       const q = await corpo();
       if (!['1', '2', '3'].includes(String(q.pessoa))) throw new Error('identidade');
       return json(aoPedir(q.servidor || 'a', String(q.pessoa), q.canal ?? 1, q.corpo));
+    }
+    // A ação declarada (`SeeleMods.acao`): o host confere a declaração e a permissão ANTES da metade de servidor.
+    if (url.pathname === '/acao' && req.method === 'POST') {
+      const q = await corpo();
+      if (!['1', '2', '3'].includes(String(q.pessoa))) throw new Error('identidade');
+      return json(aoPedirPelaAcao(q.servidor || 'a', String(q.pessoa), q.canal ?? 1, String(q.acao), q.corpo));
     }
     // O envio pelo volume: só com o token que a metade de servidor deu a esta pessoa.
     if (url.pathname === '/enviar' && req.method === 'POST') {

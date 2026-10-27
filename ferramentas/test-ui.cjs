@@ -66,8 +66,14 @@ function png(lado = 8) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ servidor: 'a', pessoa, canal: 1, corpo: c }),
       })).json();
+      // Criar a mesa só vale pela ação (API 7): o laboratório confere a declaração e a permissão, como o servidor.
+      const pelaAcao = async (acao, c) => (await fetch(url + '/acao', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ servidor: 'a', pessoa, canal: 1, acao, corpo: c }),
+      })).json();
       const visto = await pedir({ op: 'view' });
-      const r = await pedir({ revision: visto.campaign?.revision ?? 0, nonce: 'semente-' + (++serie), ...corpo });
+      const montado = { revision: visto.campaign?.revision ?? 0, nonce: 'semente-' + (++serie), ...corpo };
+      const r = corpo.op === 'setup' ? await pelaAcao('criar-campanha', montado) : await pedir(montado);
       assert.equal(r.ok, true, JSON.stringify(r));
       return r;
     };
@@ -208,7 +214,7 @@ function png(lado = 8) {
     await semErroDito(celular, 'no celular');
 
     assert.deepEqual(erros, [], 'a janela registrou erros: ' + erros.join(' · '));
-    console.log(manifest.id + ': renderer e prelúdio da 0.16, página, folha, palco, cabeçalho, volume, '
+    console.log(manifest.id + ': renderer e prelúdio do SEELE_RAIZ (a 0.17), página, folha, palco, cabeçalho, volume, '
       + 'celular, dados autorizados, saída e reconexão conferidos.');
   } finally {
     await navegador?.close();

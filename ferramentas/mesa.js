@@ -33,7 +33,7 @@
 const {
   texto, cabecalho, campo, escolha, botao, linha, arquivo, midia,
   caixa, pilha, grade, espaco, formulario, acoes, abas, aba, textoLongo, numero, marca, distintivo,
-  request, agruparAtualizacoes, anotar, canalDe,
+  request, acao, agruparAtualizacoes, anotar, canalDe,
   pagina, dialogo, folha, dizer, contribuir, atualizarContribuicao, revogar, entrada,
   lerRetrato, ouvir, podeEnviar, enviar, soltar,
 } = interfaceMod('seele/mesa', 'MESA');
@@ -94,7 +94,11 @@ const FRASES = {
   conflict: 'outra pessoa mudou a mesa ao mesmo tempo; tente de novo',
   'gm-only': 'só quem mestra pode fazer isto',
   'not-owner': 'isto é de outra pessoa',
-  'admin-only': 'só quem administra o servidor cria a mesa',
+  'admin-only': 'só quem tem a permissão de criar a mesa pode criá-la',
+  'pede-a-acao-criar-campanha': 'criar a mesa só vale pela ação própria; atualize o SEELE e tente de novo',
+  'sem-permissao': 'você não tem a permissão «Criar a mesa de um canal» neste servidor; quem administra a concede por cargo',
+  'acao-nao-declarada': 'este servidor não conhece a ação de criar a mesa; atualize o SEELE de quem hospeda',
+  'sem-acoes': 'este SEELE não oferece as ações de MOD (API 7); atualize o SEELE',
   'already-created': 'este canal já tem uma mesa',
   'not-found': 'isto não está mais na mesa',
   limit: 'a mesa chegou ao teto deste tipo de coisa: apague um para pôr outro',
@@ -472,6 +476,8 @@ async function escreverJa(canal, pedido, marca) {
     const completo = { ...corpo, nonce: marca };
     const c = vistaDe(canal)?.campaign;
     if (corpo.op !== 'setup' && c) completo.revision = c.revision;
+    // **Criar a mesa é a ação declarada** (API 7); todo o resto segue pelo pedido comum, com as regras de mestre e de dono do servidor.
+    if (corpo.op === 'setup') return acao(canal, 'criar-campanha', completo);
     return request(canal, completo);
   };
   let resposta;
@@ -941,7 +947,7 @@ function aTrilhaDaPagina(v, parada = false) {
 function oConvite(v) {
   if (!v.canSetup) {
     return [estadoVazio('Nenhuma mesa neste canal',
-      'Quem administra este servidor pode criar a mesa. Peça a criação ou escolha outro canal.')];
+      'Criar a mesa pede a permissão «Criar a mesa de um canal», que quem administra o servidor concede por cargo. Peça a criação ou escolha outro canal.')];
   }
   return [
     estadoVazio('Nenhuma mesa neste canal', 'Crie a mesa: o nome, o sistema e quem mestra.'),
@@ -1428,7 +1434,7 @@ const FORMULARIOS = {
       textoCurto('name', 'NOME DA MESA', '', 80, true),
       deEscolha('system', 'SISTEMA', 'dnd5e-2014', SISTEMAS),
       deEscolha('gm', 'QUEM MESTRA', String(d.eu), pessoasComoOpcoes([d.eu])),
-      caixa(['Quem mestra pode ser outra pessoa: quem administra cria a mesa, e quem joga com ela a conduz.'], { corpo: 11, opacidade: 0.7 }),
+      caixa(['Quem mestra pode ser outra pessoa: quem tem a permissão cria a mesa, e quem joga com ela a conduz.'], { corpo: 11, opacidade: 0.7 }),
     ],
     longos: [],
   }),

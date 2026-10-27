@@ -184,7 +184,7 @@
   }
   function projection(c, ctx) {
     const rules = { skills, abilities: abilityLabels, ambience };
-    if (!c) return { ok: true, campaign: null, me: ctx.person, canSetup: ctx.admin, rules };
+    if (!c) return { ok: true, campaign: null, me: ctx.person, canSetup: Array.isArray(ctx.permissoes) && ctx.permissoes.includes('criar-campanha'), rules };
     const master = c.gm === ctx.person;
     const visible = c.scenes.filter(s => master || (s.published && s.id === c.active));
     const out = {
@@ -253,12 +253,18 @@
         if (!s.portrait?.asset) fail('not-found');
         return JSON.stringify(mediaReply(s.portrait.asset, s.portrait.volume, r));
       }
-      if (!ctx.write && !ctx.admin) fail('read-only');
+      // **A ação autoriza criar a mesa, e mais nada.** Uma `criar-campanha` com o corpo de outra operação é recusada, e a exceção ao
+      // modo só leitura é do `setup`: quem tem a permissão não ganha, por ela, o poder de escrever numa mesa que já existe.
+      if (ctx.acao === 'criar-campanha' && r.op !== 'setup') fail(ctx.write || ctx.admin ? 'acao-so-cria-a-mesa' : 'read-only');
+      if (!ctx.write && !ctx.admin && !(r.op === 'setup' && ctx.acao === 'criar-campanha')) fail('read-only');
       const nonce = key(r.nonce);
       if (c && c.receipts.some(v => v === ctx.person + ':' + nonce)) return JSON.stringify(projection(c, ctx));
       if (r.op === 'setup') {
         if (c) fail('already-created');
-        if (!ctx.admin) fail('admin-only');
+        // **API 7: só a ação cria a mesa.** `ctx.acao` é escrita pelo HOST depois do portão dos cargos; nunca vem do corpo do
+        // pedido. Nem `ctx.admin` nem `ctx.permissoes` decidem (a segunda é informativa e chega também num ModRequest comum).
+        // O dono (`gm`) e o mestre continuam valendo em tudo o que vem depois: a ação só abre a criação.
+        if (ctx.acao !== 'criar-campanha') fail('pede-a-acao-criar-campanha');
         c = { version: 1, name: named(text(r.name, 80, 'name')), system: r.system, gm: owner(r.gm, 'gm'), revision: 0, counter: 0, allowMove: true, allowEdit: true, active: null, sheets: [], scenes: [], initiative: [], turn: 0, round: 1, log: [], entries: [], receipts: [] };
         if (!['dnd5e-2014', 'free'].includes(r.system)) fail('invalid-system', 'system', 'um dos sistemas oferecidos');
       } else {

@@ -23,7 +23,7 @@
 //!
 //! # Onde está o SEELE
 //!
-//! `SEELE_RAIZ`, na compilação: a raiz de um checkout do SEELE 0.16, como a do
+//! `SEELE_RAIZ`, na compilação: a raiz de um checkout do SEELE 0.17, como a do
 //! laboratório do navegador. Um caminho relativo fixo não achava o SEELE de
 //! uma árvore de trabalho do git.
 
@@ -99,7 +99,7 @@ fn metade_de_servidor() -> Result<(Runtime, Context), Box<dyn std::error::Error>
     Ok((runtime, context))
 }
 
-/// A metade de servidor: `aoPedir`, sem ambiente nenhum além do da API 6.
+/// A metade de servidor: `aoPedir`, sem ambiente nenhum além do da API 7 (o HOST escreve `contexto.acao` e `permissoes`).
 fn servidor() -> Result<(), Box<dyn std::error::Error>> {
     let (_runtime, context) = metade_de_servidor()?;
     let result = context.with(|ctx| -> Result<String, String> {
@@ -136,7 +136,9 @@ fn cliente() -> Result<(), Box<dyn std::error::Error>> {
     let (_rs, servidor) = metade_de_servidor()?;
     // A mesa que a janela vai encontrar: uma cena com peça, uma ficha, a
     // trilha e a sala 7 amarrada.
-    let mestre = serde_json::json!({ "person": "1", "channel": 1, "admin": true, "write": true, "sala": 7 });
+// O HOST (API 7): `acao` é null num pedido comum e a ação declarada só quando a janela pediu `SeeleMods.acao`; `permissoes` é informativa.
+    let mestre = serde_json::json!({ "person": "1", "channel": 1, "admin": true, "write": true, "sala": 7, "acao": null, "permissoes": ["criar-campanha"] });
+    let mestre_pela_acao = serde_json::json!({ "person": "1", "channel": 1, "admin": true, "write": true, "sala": 7, "acao": "criar-campanha", "permissoes": ["criar-campanha"] });
     let mut revisao = 0;
     for (i, valor) in [
         serde_json::json!({ "op": "setup", "name": "Mesa do QuickJS", "system": "dnd5e-2014", "gm": "1" }),
@@ -153,7 +155,9 @@ fn cliente() -> Result<(), Box<dyn std::error::Error>> {
         let mut valor = valor;
         valor["nonce"] = serde_json::json!(format!("semente-{i}"));
         valor["revision"] = serde_json::json!(revisao);
-        let (resposta, _) = pedir(&servidor, &mestre, &valor).map_err(std::io::Error::other)?;
+        // Criar a mesa é a ação; o resto da semente segue por pedido comum, pelas regras de mestre e de dono.
+        let contexto = if valor["op"] == "setup" { &mestre_pela_acao } else { &mestre };
+        let (resposta, _) = pedir(&servidor, contexto, &valor).map_err(std::io::Error::other)?;
         let lida: serde_json::Value = serde_json::from_str(&resposta)?;
         revisao = lida["campaign"]["revision"].as_u64().ok_or_else(|| format!("semente {i}: {resposta}"))?;
     }
@@ -193,11 +197,11 @@ fn cliente() -> Result<(), Box<dyn std::error::Error>> {
         let manifesto: serde_json::Value = serde_json::from_str(include_str!("../../../mod.json"))
             .map_err(|e| format!("mod.json: {e}"))?;
         let api = manifesto.get("api").and_then(serde_json::Value::as_u64).ok_or("o manifesto não declara `api`")?;
-        let contrato: serde_json::Value = serde_json::from_str(include_str!("../../../test/contrato/api-v6.json"))
+        let contrato: serde_json::Value = serde_json::from_str(include_str!("../../../test/contrato/api-v7.json"))
             .map_err(|e| format!("contrato: {e}"))?;
         let capacidades = contrato["compatibilidade"]["capacidades-por-versao"][api.to_string()].clone();
         if !capacidades.is_array() {
-            return Err(format!("o contrato da 6 não tem capacidades para a API {api}"));
+            return Err(format!("o contrato (api/v7.json, que traz a 6 inteira) não tem capacidades para a API {api}"));
         }
         ctx.eval::<(), _>(format!("globalThis.__seeleCapacidades = {capacidades};"))
             .map_err(|e| format!("capacidades: {e}: {:?}", ctx.catch()))?;
@@ -281,11 +285,14 @@ fn cliente() -> Result<(), Box<dyn std::error::Error>> {
             let mut avisos = Vec::new();
             let valor: serde_json::Value = match tipo.as_str() {
                 "retrato" => retrato.clone(),
-                "pedido" => {
+                // `pedido` é o `SeeleMods.request`; `acao` é o `SeeleMods.acao` (API 7): o HOST escreve o `contexto.acao`, só da ação
+                // declarada (`criar-campanha`), e nunca do que a janela mandou no corpo.
+                "pedido" | "acao" => {
                     let canal = m["canal"].as_u64().unwrap_or(0);
+                    let acao_do_host = if tipo == "acao" && m["acao"] == "criar-campanha" { serde_json::json!("criar-campanha") } else { serde_json::Value::Null };
                     let contexto = serde_json::json!({
                         "person": "1", "channel": if canal == 0 { serde_json::Value::Null } else { serde_json::json!(canal) },
-                        "admin": true, "write": true, "sala": 7
+                        "admin": true, "write": true, "sala": 7, "acao": acao_do_host, "permissoes": ["criar-campanha"]
                     });
                     let (resposta, novos) = pedir(&servidor, &contexto, &m["valor"]).map_err(std::io::Error::other)?;
                     avisos = novos;
@@ -344,7 +351,7 @@ fn cliente() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("a conversa não assentou: {} evento(s) não chegaram a ir", eventos.len() - proximo_evento).into());
     }
     println!(
-        "QuickJS 0.12.2 / 8 MiB: o cliente sobe no prelúdio da 0.16, sem DOM e sem Node, conversa com a \
+        "QuickJS 0.12.2 / 8 MiB: o cliente sobe no prelúdio da 0.17, sem DOM e sem Node, conversa com a \
          metade de servidor e recebe os avisos dela: {} retrato(s), {} pedido(s), {} montagem(ns), {} parte(s) \
          atualizada(s), {} contribuição(ões) registrada(s) e {} atualizada(s), nenhuma acima de 12 KiB.",
         conta("retrato"), conta("pedido"), conta("superficie-montar"), conta("superficie-atualizar"),

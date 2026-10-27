@@ -1,12 +1,18 @@
 (() => {
   let revision=0, nonce=0;
   const assert=(condition,message)=>{if(!condition)throw new Error(message);};
-  function request(person,op,extra={}) {
-    const response=JSON.parse(aoPedir(JSON.stringify({person:String(person),channel:1,admin:person===1,write:true}),JSON.stringify({op,nonce:'q-'+(++nonce),revision,...extra})));
+  // O HOST (API 7) escreve `acao` (null num pedido comum) e `permissoes` (informativa); a ação declarada é `criar-campanha`.
+  function request(person,op,extra={},acao=null,write=true) {
+    const response=JSON.parse(aoPedir(JSON.stringify({person:String(person),channel:1,admin:person===1,write,acao,permissoes:person===1?['criar-campanha']:[]}),JSON.stringify({op,nonce:'q-'+(++nonce),revision,...extra})));
     if(response.campaign)revision=response.campaign.revision;
     return response;
   }
-  assert(request(1,'setup',{name:'QuickJS',system:'dnd5e-2014',gm:'1'}).ok,'setup');
+  // Criar a mesa só vale pela ação: o pedido comum (mesmo do admin, mesmo com o corpo falsificado) é negado.
+  assert(request(1,'setup',{name:'QuickJS',system:'dnd5e-2014',gm:'1',acao:'criar-campanha',admin:true,permissoes:['criar-campanha']}).error==='pede-a-acao-criar-campanha','plain setup denied');
+  assert(request(1,'setup',{name:'QuickJS',system:'dnd5e-2014',gm:'1'},'criar-campanha').ok,'setup by action');
+  // A ação autoriza criar a mesa e mais nada: com o corpo de outra operação é negada, com ou sem escrita no canal.
+  assert(request(1,'settings',{name:'Invadida',allowMove:true,allowEdit:true},'criar-campanha').error==='acao-so-cria-a-mesa','action is not a master key');
+  assert(request(2,'settings',{name:'Invadida',allowMove:true,allowEdit:true},'criar-campanha',false).error==='read-only','action does not bypass read-only');
   assert(__avisos.some(a=>a.canal===1&&a.carga.revisao===1),'the write announced its revision');
   let r=request(1,'sheet-create',{name:'Iria',owner:'2'});const sheet=r.campaign.sheets[0].id;
   // The portrait goes through the volume (ADR 0048): the server opens the

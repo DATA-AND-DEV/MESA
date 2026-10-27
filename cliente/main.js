@@ -1,4 +1,4 @@
-/* Gerado por ferramentas/build.mjs. API 6. */
+/* Gerado por ferramentas/build.mjs. API 7. */
 (() => {
 "use strict";
 // Executado exclusivamente no executor do MOD. Cada pacote inclui sua cópia.
@@ -114,6 +114,21 @@ function interfaceMod(id, titulo) {
     return resposta;
   }
 
+  /**
+   * Uma **ação declarada** (API 7): o pedido que o servidor só deixa passar a quem tem a permissão dela. `SeeleMods.acao` só
+   * existe com a capacidade `acoes`. A recusa dos cargos chega como valor (`recusa`), e vira um `Error` com o código dela
+   * (`sem-permissao`, `acao-nao-declarada`), que a tabela de frases desta casa traduz. A janela não confere nada.
+   */
+  async function acao(canal, nome, valor) {
+    if (typeof api.acao !== 'function') throw new Error('sem-acoes');
+    const resposta = await api.acao(id, canal, nome, valor);
+    if (resposta?.ok) return resposta;
+    if (resposta?.recusa) throw new Error(resposta.recusa);
+    const falha = new Error(resposta?.error || 'O servidor recusou a consulta.');
+    if (resposta?.erros && typeof resposta.erros === 'object') falha.erros = resposta.erros;
+    throw falha;
+  }
+
   /** Uma atualização em voo e apenas o estado mais recente aguardando. */
   function agruparAtualizacoes(atualizar) {
     let emVoo = null;
@@ -121,13 +136,17 @@ function interfaceMod(id, titulo) {
     return (...args) => {
       proxima = args;
       if (!emVoo) {
+        // O `emVoo` zera NO FIM do laço, e não num `.finally` (um microtask depois): uma chamada que chegasse nesse intervalo
+        // gravava `proxima` depois de o laço ter olhado, via `emVoo` ainda de pé e nunca era atendida.
         emVoo = Promise.resolve().then(async () => {
-          while (proxima) {
-            const atuais = proxima;
-            proxima = null;
-            await atualizar(...atuais);
-          }
-        }).finally(() => { emVoo = null; });
+          try {
+            while (proxima) {
+              const atuais = proxima;
+              proxima = null;
+              await atualizar(...atuais);
+            }
+          } finally { emVoo = null; }
+        });
       }
       return emVoo;
     };
@@ -222,7 +241,7 @@ function interfaceMod(id, titulo) {
     caixa, pilha, grade, separador, espaco,
     formulario, acoes, abas, aba, textoLongo, numero, marca, distintivo,
     // servidor
-    request, agruparAtualizacoes, anotar, canalDe,
+    request, acao, agruparAtualizacoes, anotar, canalDe,
     // superfícies e contribuições
     superficie, pagina, dialogo, folha, avisar, dizer,
     contribuir, atualizarContribuicao, revogar, entrada,
@@ -266,7 +285,7 @@ function interfaceMod(id, titulo) {
 const {
   texto, cabecalho, campo, escolha, botao, linha, arquivo, midia,
   caixa, pilha, grade, espaco, formulario, acoes, abas, aba, textoLongo, numero, marca, distintivo,
-  request, agruparAtualizacoes, anotar, canalDe,
+  request, acao, agruparAtualizacoes, anotar, canalDe,
   pagina, dialogo, folha, dizer, contribuir, atualizarContribuicao, revogar, entrada,
   lerRetrato, ouvir, podeEnviar, enviar, soltar,
 } = interfaceMod('seele/mesa', 'MESA');
@@ -327,7 +346,11 @@ const FRASES = {
   conflict: 'outra pessoa mudou a mesa ao mesmo tempo; tente de novo',
   'gm-only': 'só quem mestra pode fazer isto',
   'not-owner': 'isto é de outra pessoa',
-  'admin-only': 'só quem administra o servidor cria a mesa',
+  'admin-only': 'só quem tem a permissão de criar a mesa pode criá-la',
+  'pede-a-acao-criar-campanha': 'criar a mesa só vale pela ação própria; atualize o SEELE e tente de novo',
+  'sem-permissao': 'você não tem a permissão «Criar a mesa de um canal» neste servidor; quem administra a concede por cargo',
+  'acao-nao-declarada': 'este servidor não conhece a ação de criar a mesa; atualize o SEELE de quem hospeda',
+  'sem-acoes': 'este SEELE não oferece as ações de MOD (API 7); atualize o SEELE',
   'already-created': 'este canal já tem uma mesa',
   'not-found': 'isto não está mais na mesa',
   limit: 'a mesa chegou ao teto deste tipo de coisa: apague um para pôr outro',
@@ -705,6 +728,8 @@ async function escreverJa(canal, pedido, marca) {
     const completo = { ...corpo, nonce: marca };
     const c = vistaDe(canal)?.campaign;
     if (corpo.op !== 'setup' && c) completo.revision = c.revision;
+    // **Criar a mesa é a ação declarada** (API 7); todo o resto segue pelo pedido comum, com as regras de mestre e de dono do servidor.
+    if (corpo.op === 'setup') return acao(canal, 'criar-campanha', completo);
     return request(canal, completo);
   };
   let resposta;
@@ -1174,7 +1199,7 @@ function aTrilhaDaPagina(v, parada = false) {
 function oConvite(v) {
   if (!v.canSetup) {
     return [estadoVazio('Nenhuma mesa neste canal',
-      'Quem administra este servidor pode criar a mesa. Peça a criação ou escolha outro canal.')];
+      'Criar a mesa pede a permissão «Criar a mesa de um canal», que quem administra o servidor concede por cargo. Peça a criação ou escolha outro canal.')];
   }
   return [
     estadoVazio('Nenhuma mesa neste canal', 'Crie a mesa: o nome, o sistema e quem mestra.'),
@@ -1661,7 +1686,7 @@ const FORMULARIOS = {
       textoCurto('name', 'NOME DA MESA', '', 80, true),
       deEscolha('system', 'SISTEMA', 'dnd5e-2014', SISTEMAS),
       deEscolha('gm', 'QUEM MESTRA', String(d.eu), pessoasComoOpcoes([d.eu])),
-      caixa(['Quem mestra pode ser outra pessoa: quem administra cria a mesa, e quem joga com ela a conduz.'], { corpo: 11, opacidade: 0.7 }),
+      caixa(['Quem mestra pode ser outra pessoa: quem tem a permissão cria a mesa, e quem joga com ela a conduz.'], { corpo: 11, opacidade: 0.7 }),
     ],
     longos: [],
   }),
