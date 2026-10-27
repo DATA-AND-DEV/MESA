@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "seele/mesa",
-  "version": "5.0.0",
+  "version": "5.0.1",
   "api": 7,
   "repo": "https://github.com/DATA-AND-DEV/MESA",
   "reach": [

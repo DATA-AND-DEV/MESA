@@ -1373,3 +1373,29 @@ test('API 7: a revogação no servidor nega a criação com a janela já aberta,
   const dito = JSON.stringify([...janela.superficies.values()].map(sf => sf.declaracao ?? null)) + JSON.stringify(janela.avisos);
   assert.match(dito, /não tem a permissão «Criar a mesa de um canal»/);
 });
+
+for (const canal of ['', '1']) {
+  test(`abrir mesa oculta pelo host restaura sem fechar ficha ou reiniciar trilha (${canal || 'navegação'})`, async () => {
+    const servidor = mesaPronta();
+    servidor.escrever('1', 1, { op: 'music', command: 'select', preset: 'battle' });
+    const janela = await janelaPronta(servidor);
+    const pagina = await abrirAMesa(janela);
+    const ficha = await abrirAFicha(janela, 'sheet-2');
+    const dados = JSON.stringify(campanha(servidor));
+    pagina.visivel = false; // O host troca de vista sem emitir o evento fechar.
+    const antes = pagina.historico.length;
+    for (let n = 0; n < 2; n++) {
+      janela.emitir({ nome: 'acao', acao: 'abrir-mesa', pessoa: '', canal });
+      await assentar();
+      assert.equal(pagina.visivel, true);
+      assert.equal(janela.superficies.get('mesa'), pagina);
+      assert.equal(janela.superficies.get('mesa-ficha'), ficha);
+      assert.equal(ficha.visivel, true);
+      assert.equal(JSON.stringify(campanha(servidor)), dados);
+    }
+    const trilhas = pagina.historico.slice(antes).filter(h => h.chave === 'parte:trilha')
+      .map(h => JSON.stringify(h.arvore));
+    assert.ok(trilhas.every(t => !t.includes('"tocando":false')), 'ocultar não deve reiniciar a trilha');
+    assert.deepEqual(janela.erros, []);
+  });
+}

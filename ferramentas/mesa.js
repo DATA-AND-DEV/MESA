@@ -859,11 +859,13 @@ async function abrirMesa(canal, segue) {
         anotar('error', 'MESA: as classes da página: ' + frase(erro) + doRecusado(erro));
         await dizer('A MESA não conseguiu declarar o estilo da página: ' + frase(erro), 'erro');
       }
-    } else if (!pag.aberta) {
+    } else {
+      // O host pode ocultar a página ao trocar de vista sem emitir fechar.
+      // Todo gesto explícito de abrir precisa trazê-la de volta.
       await pag.punho.mostrar();
-      // **A trilha que tocava aqui foi pausada pelo produto ao fechar**, e
-      // `tocando` vale na mudança: a mesma declaração não a religa.
-      pag.religar = true;
+      // Só o fechamento real pausou a trilha: ocultar ou clicar novamente
+      // não deve reiniciar o áudio nem descartar a ficha que está aberta.
+      if (!pag.aberta) pag.religar = true;
     }
     pag.aberta = true;
   });

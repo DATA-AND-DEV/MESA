@@ -1,4 +1,6 @@
-# SEELE MOD MESA — 5.0.0
+# SEELE MOD MESA — 5.0.1
+
+A 5.0.1 restaura a mesa ao abrir pela navegação ou pelo cabeçalho depois de trocar de vista, sem reiniciar a trilha nem fechar fichas abertas. Campanhas e permissões permanecem iguais.
 
 Requer a **API de MOD 7**, a do app 0.17 (Servidor 2.0; contrato em `api/v7.json`). A MESA 4.0.0, na API 6, segue sendo a do app 0.16 (Servidor 1.0) e **não ganha** a ação: **esta variante é da API 7, e não é a API 6 migrada**, e a 0.16 a recusa. Atualizar da 4.0.0 para a 5.0.0 mantém as campanhas (o quintal é o mesmo); o que muda é que **criar a mesa** é a ação `criar-campanha` (`SeeleMods.acao`), e um pedido comum que imite a criação é negado pelo servidor. As regras de mestre e de dono das fichas e das peças seguem as mesmas.
 
